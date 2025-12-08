@@ -1,0 +1,67 @@
+# FacePass Configuration
+
+# Camera settings
+camera:
+  device: /dev/video0
+  width: 640
+  height: 480
+  fps: 30
+  prefer_ir: true
+  # IR camera device (usually video2 on laptops with IR)
+  ir_device: /dev/video2
+  # Regular camera fallback
+  rgb_device: /dev/video0
+  # IR emitter control
+  ir_emitter_enabled: true
+  ir_emitter_tool: linux-enable-ir-emitter  # or 'sysfs'
+
+# Recognition settings
+recognition:
+  # Lower = more strict (less false positives)
+  confidence_threshold: 0.6
+  # Distance tolerance for face matching
+  tolerance: 0.4
+  # Path to dlib models
+  model_path: ~/.local/share/facepass/models
+
+# Liveness detection settings
+liveness_detection:
+  # Levels: basic, standard, strict, paranoid
+  level: standard
+
+  # Tier 1: Basic checks (always enabled)
+  blink_required: true
+  consistency_check: true
+
+  # Tier 2: Challenge-response
+  challenge_response: false
+
+  # Tier 3: Advanced analysis (if IR camera available)
+  ir_analysis: true
+  texture_analysis: true
+
+  # Thresholds
+  min_liveness_score: 0.7
+  max_authentication_time: 10  # seconds
+
+# Authentication settings
+auth:
+  # Seconds before fallback to password
+  timeout: 10
+  # Max face recognition attempts
+  max_attempts: 3
+  # Allow password fallback
+  fallback_enabled: true
+
+# Storage settings
+storage:
+  # Per-user storage location
+  data_dir: ~/.local/share/facepass
+  # Encrypt face embeddings at rest
+  encryption_enabled: true
+
+# Logging
+logging:
+  # Log levels: debug, info, warn, error
+  level: info
+  file: ~/.local/share/facepass/facepass.log

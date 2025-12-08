@@ -1,0 +1,13 @@
+# PAM configuration for FacePass
+# Copy this to /etc/pam.d/facepass
+
+# FacePass face recognition authentication
+auth    [success=1 default=ignore]  pam_exec.so quiet /usr/local/bin/facepass-pam
+auth    requisite                   pam_deny.so
+auth    required                    pam_permit.so
+
+# For integration with system authentication, add to /etc/pam.d/common-auth:
+# auth    [success=2 default=ignore]  pam_exec.so quiet /usr/local/bin/facepass-pam
+# auth    [success=1 default=ignore]  pam_unix.so nullok_secure try_first_pass
+# auth    requisite                   pam_deny.so
+# auth    required                    pam_permit.so
