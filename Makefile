@@ -100,7 +100,38 @@ uninstall:
 	@echo "Run 'sudo rm -rf $(DATA_PATH)' to remove all data"
 
 test:
+	@echo "Running tests..."
+	go test ./...
+
+test-verbose:
+	@echo "Running tests (verbose)..."
 	go test -v ./...
+
+test-coverage:
+	@echo "Running tests with coverage..."
+	@./scripts/run-tests.sh --coverage
+
+test-race:
+	@echo "Running tests with race detection..."
+	go test -race ./...
+
+test-all:
+	@echo "Running full test suite..."
+	@./scripts/run-tests.sh --coverage --race --verbose
+
+test-integration:
+	@echo "Running integration tests..."
+	go test -tags=integration -v ./...
+
+test-benchmark:
+	@echo "Running benchmarks..."
+	go test -bench=. -benchmem ./...
+
+coverage-html:
+	@echo "Generating HTML coverage report..."
+	go test -coverprofile=coverage.out ./...
+	go tool cover -html=coverage.out -o coverage.html
+	@echo "Coverage report: coverage.html"
 
 run-cli:
 	go run ./cmd/facepass
