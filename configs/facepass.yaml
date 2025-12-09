@@ -65,3 +65,25 @@ logging:
   # Log levels: debug, info, warn, error
   level: info
   file: ~/.local/share/facepass/facepass.log
+
+# GPU/NPU Acceleration Settings
+acceleration:
+  # Backend selection: auto, cpu, rocm, cuda, openvino
+  # - auto: Automatically detect and use best available
+  # - cpu: CPU only (dlib) - always works
+  # - rocm: AMD ROCm (tested and supported)
+  # - cuda: NVIDIA CUDA (needs community testing)
+  # - openvino: Intel OpenVINO (needs community testing)
+  backend: auto
+
+  # Fall back to CPU if preferred backend unavailable
+  fallback_to_cpu: true
+
+  # GPU device index (for multi-GPU systems)
+  device_index: 0
+
+  # Enable performance profiling (debug)
+  enable_profiling: false
+
+  # ONNX model path (for accelerated backends)
+  onnx_model_path: /usr/share/facepass/models/onnx

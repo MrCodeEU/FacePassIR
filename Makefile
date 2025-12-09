@@ -1,4 +1,5 @@
 .PHONY: all build clean install uninstall test run-cli run-pam install-pam dev
+.PHONY: build-rocm build-cuda build-openvino build-accelerated detect-gpu download-models
 
 BINARY_CLI=facepass
 BINARY_PAM=facepass-pam
@@ -6,15 +7,67 @@ INSTALL_PATH=/usr/local/bin
 PAM_PATH=/usr/lib/security
 CONFIG_PATH=/etc/facepass
 DATA_PATH=/var/lib/facepass
+MODEL_PATH=/usr/share/facepass/models
+
+# Build tags for acceleration
+ROCM_TAGS=-tags rocm
+CUDA_TAGS=-tags cuda
+OPENVINO_TAGS=-tags openvino
 
 all: build
 
+# Standard CPU build (always works)
 build:
-	@echo "Building FacePass..."
+	@echo "Building FacePass (CPU)..."
 	@mkdir -p bin
 	go build -o bin/$(BINARY_CLI) ./cmd/facepass
 	go build -o bin/$(BINARY_PAM) ./cmd/facepass-pam
 	@echo "Build complete!"
+
+# AMD ROCm accelerated build (tested and supported)
+build-rocm:
+	@echo "Building FacePass with AMD ROCm acceleration..."
+	@echo "Note: Requires ROCm and ONNX Runtime ROCm package installed"
+	@mkdir -p bin
+	CGO_ENABLED=1 go build $(ROCM_TAGS) -o bin/$(BINARY_CLI) ./cmd/facepass
+	CGO_ENABLED=1 go build $(ROCM_TAGS) -o bin/$(BINARY_PAM) ./cmd/facepass-pam
+	@echo "ROCm build complete!"
+
+# NVIDIA CUDA accelerated build (needs community testing)
+build-cuda:
+	@echo "Building FacePass with NVIDIA CUDA acceleration..."
+	@echo "WARNING: CUDA support has not been tested by maintainers!"
+	@echo "Please report issues at: https://github.com/MrCodeEU/facepass/issues"
+	@mkdir -p bin
+	CGO_ENABLED=1 go build $(CUDA_TAGS) -o bin/$(BINARY_CLI) ./cmd/facepass
+	CGO_ENABLED=1 go build $(CUDA_TAGS) -o bin/$(BINARY_PAM) ./cmd/facepass-pam
+	@echo "CUDA build complete!"
+
+# Intel OpenVINO accelerated build (needs community testing)
+build-openvino:
+	@echo "Building FacePass with Intel OpenVINO acceleration..."
+	@echo "WARNING: OpenVINO support has not been tested by maintainers!"
+	@echo "Please report issues at: https://github.com/MrCodeEU/facepass/issues"
+	@mkdir -p bin
+	CGO_ENABLED=1 go build $(OPENVINO_TAGS) -o bin/$(BINARY_CLI) ./cmd/facepass
+	CGO_ENABLED=1 go build $(OPENVINO_TAGS) -o bin/$(BINARY_PAM) ./cmd/facepass-pam
+	@echo "OpenVINO build complete!"
+
+# Auto-detect GPU and build with appropriate acceleration
+build-accelerated:
+	@echo "Auto-detecting GPU acceleration..."
+	@./scripts/detect-gpu.sh && ./scripts/build-accelerated.sh
+
+# Detect available GPU/NPU
+detect-gpu:
+	@./scripts/detect-gpu.sh
+
+# Download models (including ONNX models for acceleration)
+download-models:
+	@./scripts/download-models.sh
+
+download-models-onnx:
+	@./scripts/download-models.sh --onnx
 
 clean:
 	rm -rf bin/

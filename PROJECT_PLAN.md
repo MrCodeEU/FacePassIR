@@ -138,7 +138,34 @@ facepass/
 - [ ] Model path configuration
 - [ ] Storage location configuration
 
-### Phase 8: Installation & Integration (Days 10-11)
+### Phase 7.5: GPU/NPU Acceleration (Days 10-12)
+Hardware acceleration for improved performance and accuracy.
+
+**Priority Order:**
+1. **AMD ROCm** (Primary - tested and supported)
+2. **NVIDIA CUDA** (Secondary - implemented but needs community testing)
+3. **Intel OpenVINO** (Tertiary - implemented but needs community testing)
+
+**Implementation:**
+- [ ] Create acceleration backend abstraction layer
+- [ ] Implement ONNX Runtime integration for unified acceleration
+- [ ] AMD ROCm support via ONNX Runtime ROCm EP
+- [ ] NVIDIA CUDA support via ONNX Runtime CUDA EP
+- [ ] Intel OpenVINO support via ONNX Runtime OpenVINO EP
+- [ ] Automatic backend detection and fallback
+- [ ] Convert dlib models to ONNX format
+- [ ] Build scripts for each acceleration backend
+- [ ] Performance benchmarking tools
+- [ ] Configuration options for backend selection
+
+**Benefits:**
+- 5-10x faster face detection and recognition
+- Better support for real-time liveness detection
+- Reduced CPU load during authentication
+- Enable use of larger, more accurate models
+- NPU offloading on modern laptop APUs
+
+### Phase 8: Installation & Integration (Days 13-14)
 - [ ] Installation script (copy binaries, set permissions)
 - [ ] PAM configuration file creation
 - [ ] Model download/installation
