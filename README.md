@@ -23,6 +23,11 @@ FacePass is a secure face recognition authentication module for Linux that integ
   - Intel OpenVINO (community testing needed)
 - **Password Fallback** - Automatic fallback to password on timeout/failure
 
+## Todos
+- [ ] Make one universal build (and autodetect or set via config wich GPU-Acceleration to use)
+- [ ] Much more testing
+- [ ] ...
+
 ## Quick Start
 
 ### Prerequisites
