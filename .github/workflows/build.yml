@@ -44,7 +44,7 @@ jobs:
           apt-utils ca-certificates curl gnupg lsb-release \
           build-essential cmake pkg-config git tar g++ \
           libatlas-base-dev liblapack-dev libjpeg-dev libpam0g-dev libdlib-dev \
-          rpm rpm-build fakeroot dpkg-dev \
+          rpm fakeroot dpkg-dev \
           libx11-dev libxcb1-dev
         sudo apt-get clean
         sudo rm -rf /var/lib/apt/lists/*
@@ -128,30 +128,41 @@ jobs:
         if [[ "$VERSION" == "refs/heads/main" ]] || [[ -z "$VERSION" ]]; then
           VERSION="0.0.0"
         fi
-        mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-        cat > rpmbuild/SPECS/facepass.spec <<'EOF'
+        
+        # Create rpmbuild structure
+        mkdir -p rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+        
+        # Copy files to BUILD directory for rpmbuild
+        mkdir -p rpmbuild/BUILD/facepass-${VERSION}
+        cp -r bin rpmbuild/BUILD/facepass-${VERSION}/
+        cp -r configs rpmbuild/BUILD/facepass-${VERSION}/
+        cp README.md LICENSE rpmbuild/BUILD/facepass-${VERSION}/
+        
+        # Create spec file with proper paths
+        cat > rpmbuild/SPECS/facepass.spec <<EOF
         Name:       facepass
         Version:    ${VERSION}
-        Release:    1
+        Release:    1%{?dist}
         Summary:    Face Recognition PAM Authentication for Linux
         License:    MIT
         URL:        https://github.com/MrCodeEU/facepass
-        Requires:   dlib, blas, lapack, pam
-
+        BuildArch:  x86_64
+        
         %description
         FacePass is a secure face recognition authentication module for Linux
         that integrates with PAM. It provides a Windows Hello-like experience.
-
+        
         %install
         mkdir -p %{buildroot}/usr/local/bin
         mkdir -p %{buildroot}/etc/facepass
         mkdir -p %{buildroot}/usr/share/doc/facepass
-        install -m 755 ${GITHUB_WORKSPACE}/bin/facepass %{buildroot}/usr/local/bin/
-        install -m 755 ${GITHUB_WORKSPACE}/bin/facepass-pam %{buildroot}/usr/local/bin/
-        install -m 644 ${GITHUB_WORKSPACE}/configs/facepass.yaml %{buildroot}/etc/facepass/
-        install -m 644 ${GITHUB_WORKSPACE}/README.md %{buildroot}/usr/share/doc/facepass/
-        install -m 644 ${GITHUB_WORKSPACE}/LICENSE %{buildroot}/usr/share/doc/facepass/
-
+        
+        install -m 755 %{_builddir}/facepass-${VERSION}/bin/facepass %{buildroot}/usr/local/bin/
+        install -m 755 %{_builddir}/facepass-${VERSION}/bin/facepass-pam %{buildroot}/usr/local/bin/
+        install -m 644 %{_builddir}/facepass-${VERSION}/configs/facepass.yaml %{buildroot}/etc/facepass/
+        install -m 644 %{_builddir}/facepass-${VERSION}/README.md %{buildroot}/usr/share/doc/facepass/
+        install -m 644 %{_builddir}/facepass-${VERSION}/LICENSE %{buildroot}/usr/share/doc/facepass/
+        
         %files
         /usr/local/bin/facepass
         /usr/local/bin/facepass-pam
@@ -159,9 +170,13 @@ jobs:
         /usr/share/doc/facepass/README.md
         /usr/share/doc/facepass/LICENSE
         EOF
+        
+        # Build RPM
         rpmbuild --define "_topdir $(pwd)/rpmbuild" -bb rpmbuild/SPECS/facepass.spec
+        
+        # Move RPMs to artifacts
         mkdir -p artifacts
-        mv rpmbuild/RPMS/x86_64/*.rpm artifacts/ || true
+        find rpmbuild/RPMS -name '*.rpm' -exec mv {} artifacts/ \; || true
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
