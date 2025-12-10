@@ -46,6 +46,26 @@ sudo pacman -S dlib blas lapack pam v4l-utils ffmpeg
 
 ### Installation
 
+#### Option 1: Pre-built Packages (Recommended)
+
+We provide `.deb` packages for Debian/Ubuntu and `.rpm` packages for Fedora/RHEL/CentOS.
+
+1. Go to the [Releases](https://github.com/MrCodeEU/facepass/releases) page.
+2. Download the latest package for your distribution.
+3. Install it:
+
+   **Debian/Ubuntu:**
+   ```bash
+   sudo apt install ./facepass_*.deb
+   ```
+
+   **Fedora/RHEL:**
+   ```bash
+   sudo dnf install ./facepass-*.rpm
+   ```
+
+#### Option 2: Build from Source
+
 ```bash
 # Clone the repository
 git clone https://github.com/MrCodeEU/facepass.git
@@ -57,6 +77,17 @@ make build
 # Install (requires sudo)
 sudo ./scripts/install.sh
 ```
+
+### Compatibility & Testing
+
+**Disclaimer**: This software has been primarily developed and tested on **Linux/amd64** (Ubuntu 22.04/24.04) with specific hardware.
+
+We cannot guarantee compatibility with all:
+- Linux distributions (though most systemd/PAM based ones should work)
+- Camera hardware (IR cameras vary significantly)
+- CPU architectures (ARM/Raspberry Pi support is experimental)
+
+**We need your help!** If you successfully run FacePass on a different distro or hardware setup, please open an issue or discussion to let us know.
 
 ### Enroll Your Face
 

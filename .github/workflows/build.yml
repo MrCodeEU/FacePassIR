@@ -1,0 +1,159 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    name: Build (Linux/amd64)
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential libdlib-dev libblas-dev liblapack-dev libjpeg-dev libpam0g-dev rpm
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Build
+      run: |
+        make build
+
+    - name: Run Tests
+      run: |
+        go test -v ./pkg/...
+
+    - name: Create Tarball
+      run: |
+        mkdir -p dist/facepass/bin
+        cp bin/facepass dist/facepass/bin/
+        cp bin/facepass-pam dist/facepass/bin/
+        cp scripts/install.sh dist/facepass/
+        cp scripts/uninstall.sh dist/facepass/
+        cp -r configs dist/facepass/
+        cp README.md dist/facepass/
+        cp LICENSE dist/facepass/
+        
+        # Create a simple install script wrapper for the tarball
+        echo '#!/bin/bash' > dist/facepass/install.sh
+        echo 'cd "$(dirname "$0")"' >> dist/facepass/install.sh
+        echo 'sudo ./scripts/install.sh' >> dist/facepass/install.sh
+        chmod +x dist/facepass/install.sh
+        
+        cd dist
+        tar -czvf facepass-linux-amd64.tar.gz facepass/
+
+    - name: Create DEB Package
+      run: |
+        VERSION=${GITHUB_REF#refs/tags/v}
+        if [[ "$VERSION" == "refs/heads/main" ]] || [[ -z "$VERSION" ]]; then
+          VERSION="0.0.0-dev"
+        fi
+        
+        mkdir -p package/DEBIAN
+        mkdir -p package/usr/local/bin
+        mkdir -p package/etc/facepass
+        mkdir -p package/usr/share/doc/facepass
+        
+        # Copy files
+        cp bin/facepass package/usr/local/bin/
+        cp bin/facepass-pam package/usr/local/bin/
+        cp configs/facepass.yaml package/etc/facepass/
+        cp README.md package/usr/share/doc/facepass/
+        cp LICENSE package/usr/share/doc/facepass/
+        
+        # Create control file
+        cat > package/DEBIAN/control << EOF
+        Package: facepass
+        Version: ${VERSION}
+        Section: utils
+        Priority: optional
+        Architecture: amd64
+        Depends: libdlib-dev, libblas-dev, liblapack-dev, libpam0g
+        Maintainer: MrCodeEU
+        Description: Face Recognition PAM Authentication for Linux
+         FacePass is a secure face recognition authentication module for Linux 
+         that integrates with PAM. It provides a Windows Hello-like experience.
+        EOF
+        
+        # Build .deb
+        dpkg-deb --build package facepass_${VERSION}_amd64.deb
+
+    - name: Create RPM Package
+      run: |
+        VERSION=${GITHUB_REF#refs/tags/v}
+        if [[ "$VERSION" == "refs/heads/main" ]] || [[ -z "$VERSION" ]]; then
+          VERSION="0.0.0"
+        fi
+        
+        # Setup rpmbuild directory structure
+        mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+        
+        # Create Spec File
+        cat > rpmbuild/SPECS/facepass.spec << EOF
+        Name:       facepass
+        Version:    ${VERSION}
+        Release:    1
+        Summary:    Face Recognition PAM Authentication for Linux
+        License:    MIT
+        URL:        https://github.com/MrCodeEU/facepass
+        
+        Requires:   dlib, blas, lapack, pam
+        
+        %description
+        FacePass is a secure face recognition authentication module for Linux 
+        that integrates with PAM. It provides a Windows Hello-like experience.
+        
+        %install
+        mkdir -p %{buildroot}/usr/local/bin
+        mkdir -p %{buildroot}/etc/facepass
+        mkdir -p %{buildroot}/usr/share/doc/facepass
+        
+        install -m 755 ${GITHUB_WORKSPACE}/bin/facepass %{buildroot}/usr/local/bin/
+        install -m 755 ${GITHUB_WORKSPACE}/bin/facepass-pam %{buildroot}/usr/local/bin/
+        install -m 644 ${GITHUB_WORKSPACE}/configs/facepass.yaml %{buildroot}/etc/facepass/
+        install -m 644 ${GITHUB_WORKSPACE}/README.md %{buildroot}/usr/share/doc/facepass/
+        install -m 644 ${GITHUB_WORKSPACE}/LICENSE %{buildroot}/usr/share/doc/facepass/
+        
+        %files
+        /usr/local/bin/facepass
+        /usr/local/bin/facepass-pam
+        /etc/facepass/facepass.yaml
+        /usr/share/doc/facepass/README.md
+        /usr/share/doc/facepass/LICENSE
+        EOF
+        
+        # Build RPM
+        rpmbuild --define "_topdir $(pwd)/rpmbuild" -bb rpmbuild/SPECS/facepass.spec
+        
+        # Move RPM to root
+        mv rpmbuild/RPMS/x86_64/*.rpm .
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: facepass-build
+        path: |
+          dist/facepass-linux-amd64.tar.gz
+          *.deb
+          *.rpm
+
+    - name: Release
+      uses: softprops/action-gh-release@v1
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: |
+          dist/facepass-linux-amd64.tar.gz
+          *.deb
+          *.rpm
