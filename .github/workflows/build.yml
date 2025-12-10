@@ -67,8 +67,8 @@ jobs:
 
     - name: Run unit tests
       run: |
-        # Limit race & coverage style tests to non-hardware dependent packages
-        go test -v ./pkg/... -count=1
+        # Skip hardware-dependent camera tests in CI (no camera available)
+        go test -v ./pkg/acceleration ./pkg/config ./pkg/liveness ./pkg/logging ./pkg/pam ./pkg/recognition ./pkg/storage -count=1
 
     - name: Create Tarball
       run: |
