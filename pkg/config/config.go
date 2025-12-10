@@ -13,12 +13,12 @@ import (
 
 // Config holds all FacePass configuration.
 type Config struct {
-	Camera    CameraConfig    `yaml:"camera"`
+	Camera      CameraConfig      `yaml:"camera"`
 	Recognition RecognitionConfig `yaml:"recognition"`
-	Liveness  LivenessConfig  `yaml:"liveness_detection"`
-	Auth      AuthConfig      `yaml:"auth"`
-	Storage   StorageConfig   `yaml:"storage"`
-	Logging   LoggingConfig   `yaml:"logging"`
+	Liveness    LivenessConfig    `yaml:"liveness_detection"`
+	Auth        AuthConfig        `yaml:"auth"`
+	Storage     StorageConfig     `yaml:"storage"`
+	Logging     LoggingConfig     `yaml:"logging"`
 }
 
 // CameraConfig holds camera settings.
@@ -43,18 +43,27 @@ type RecognitionConfig struct {
 
 // LivenessConfig holds liveness detection settings.
 type LivenessConfig struct {
-	Level             string  `yaml:"level"`
-	BlinkRequired     bool    `yaml:"blink_required"`
-	ConsistencyCheck  bool    `yaml:"consistency_check"`
-	ChallengeResponse bool    `yaml:"challenge_response"`
-	IRAnalysis        bool    `yaml:"ir_analysis"`
-	TextureAnalysis   bool    `yaml:"texture_analysis"`
-	MinLivenessScore  float64 `yaml:"min_liveness_score"`
-	MaxAuthTime       int     `yaml:"max_authentication_time"`
+	Level             string             `yaml:"level"`
+	BlinkRequired     bool               `yaml:"blink_required"`
+	ConsistencyCheck  bool               `yaml:"consistency_check"`
+	ChallengeResponse bool               `yaml:"challenge_response"`
+	IRAnalysis        bool               `yaml:"ir_analysis"`
+	TextureAnalysis   bool               `yaml:"texture_analysis"`
+	MinLivenessScore  float64            `yaml:"min_liveness_score"`
+	MaxAuthTime       int                `yaml:"max_authentication_time"`
+	Thresholds        LivenessThresholds `yaml:"thresholds"`
+}
+
+// LivenessThresholds holds specific thresholds for liveness checks.
+type LivenessThresholds struct {
+	Movement    float64 `yaml:"movement"`    // Min movement to not be a static image
+	Depth       float64 `yaml:"depth"`       // Min variance for 3D depth check
+	Consistency float64 `yaml:"consistency"` // Max variance for consistency check
 }
 
 // AuthConfig holds authentication settings.
 type AuthConfig struct {
+	Enabled         bool `yaml:"enabled"`
 	Timeout         int  `yaml:"timeout"`
 	MaxAttempts     int  `yaml:"max_attempts"`
 	FallbackEnabled bool `yaml:"fallback_enabled"`
@@ -101,8 +110,14 @@ func DefaultConfig() *Config {
 			TextureAnalysis:   true,
 			MinLivenessScore:  0.7,
 			MaxAuthTime:       10,
+			Thresholds: LivenessThresholds{
+				Movement:    0.08,
+				Depth:       0.0001,
+				Consistency: 0.1,
+			},
 		},
 		Auth: AuthConfig{
+			Enabled:         true,
 			Timeout:         10,
 			MaxAttempts:     3,
 			FallbackEnabled: true,

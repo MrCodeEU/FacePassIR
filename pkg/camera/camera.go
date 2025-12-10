@@ -3,11 +3,13 @@
 package camera
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
 	"image"
 	"image/jpeg"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +18,9 @@ import (
 
 	"github.com/MrCodeEU/facepass/pkg/logging"
 )
+
+// execCommand allows mocking exec.Command for testing
+var execCommand = exec.Command
 
 // Frame represents a single camera frame.
 type Frame struct {
@@ -55,6 +60,12 @@ type V4L2Camera struct {
 	isOpen     bool
 	irEmitter  *IREmitter
 	deviceInfo DeviceInfo
+
+	// Streaming fields
+	streamCmd    *exec.Cmd
+	streamStdout io.ReadCloser
+	streamReader *bufio.Reader
+	isStreaming  bool
 }
 
 // IREmitter represents an IR emitter control interface.
@@ -100,7 +111,7 @@ func (c *V4L2Camera) Open(device string) error {
 // Close closes the camera device.
 func (c *V4L2Camera) Close() error {
 	if c.irEmitter != nil && c.irEmitter.Enabled {
-		c.DisableIREmitter()
+		_ = c.DisableIREmitter()
 	}
 	c.isOpen = false
 	logging.Debug("Camera closed")
@@ -131,7 +142,7 @@ func (c *V4L2Camera) getDeviceInfo() DeviceInfo {
 	}
 
 	// Try to get device info using v4l2-ctl
-	cmd := exec.Command("v4l2-ctl", "-d", c.device, "--info")
+	cmd := execCommand("v4l2-ctl", "-d", c.device, "--info")
 	output, err := cmd.Output()
 	if err == nil {
 		lines := strings.Split(string(output), "\n")
@@ -166,14 +177,22 @@ func (c *V4L2Camera) Capture() (*Frame, error) {
 		return nil, ErrCameraNotOpen
 	}
 
+	// Re-trigger IR emitter if enabled
+	// This is necessary because some cameras reset the emitter state
+	if c.irEmitter != nil && c.irEmitter.Enabled {
+		_ = c.triggerIREmitter()
+	}
+
 	// Create temporary file for captured frame
 	tmpDir := os.TempDir()
 	tmpFile := filepath.Join(tmpDir, fmt.Sprintf("facepass_frame_%d.jpg", time.Now().UnixNano()))
-	defer os.Remove(tmpFile)
+	defer func() {
+		_ = os.Remove(tmpFile)
+	}()
 
 	// Use ffmpeg to capture a single frame
 	// This is more reliable than direct v4l2 access in Go
-	cmd := exec.Command("ffmpeg",
+	cmd := execCommand("ffmpeg",
 		"-f", "v4l2",
 		"-video_size", fmt.Sprintf("%dx%d", c.width, c.height),
 		"-i", c.device,
@@ -199,7 +218,7 @@ func (c *V4L2Camera) Capture() (*Frame, error) {
 			return c.captureAlternative()
 		}
 	case <-time.After(5 * time.Second):
-		cmd.Process.Kill()
+		_ = cmd.Process.Kill()
 		return nil, ErrCaptureTimeout
 	}
 
@@ -231,11 +250,15 @@ func (c *V4L2Camera) captureAlternative() (*Frame, error) {
 	tmpDir := os.TempDir()
 	tmpFile := filepath.Join(tmpDir, fmt.Sprintf("facepass_frame_%d.ppm", time.Now().UnixNano()))
 	jpgFile := filepath.Join(tmpDir, fmt.Sprintf("facepass_frame_%d.jpg", time.Now().UnixNano()))
-	defer os.Remove(tmpFile)
-	defer os.Remove(jpgFile)
+	defer func() {
+		_ = os.Remove(tmpFile)
+	}()
+	defer func() {
+		_ = os.Remove(jpgFile)
+	}()
 
 	// Try using v4l2-ctl to capture a raw frame
-	cmd := exec.Command("v4l2-ctl",
+	cmd := execCommand("v4l2-ctl",
 		"-d", c.device,
 		"--set-fmt-video=width="+fmt.Sprintf("%d", c.width)+",height="+fmt.Sprintf("%d", c.height)+",pixelformat=YUYV",
 		"--stream-mmap",
@@ -248,7 +271,7 @@ func (c *V4L2Camera) captureAlternative() (*Frame, error) {
 	}
 
 	// Convert to JPEG using ImageMagick if available
-	convertCmd := exec.Command("convert", tmpFile, jpgFile)
+	convertCmd := execCommand("convert", tmpFile, jpgFile)
 	if err := convertCmd.Run(); err != nil {
 		return nil, fmt.Errorf("image conversion failed: %w", err)
 	}
@@ -299,12 +322,21 @@ func (c *V4L2Camera) EnableIREmitter() error {
 
 	logging.Debug("Enabling IR emitter")
 
+	if err := c.triggerIREmitter(); err != nil {
+		return err
+	}
+
+	c.irEmitter.Enabled = true
+	return nil
+}
+
+// triggerIREmitter triggers the IR emitter without changing state flags.
+func (c *V4L2Camera) triggerIREmitter() error {
 	// Try linux-enable-ir-emitter first
 	if c.irEmitter.Tool == "linux-enable-ir-emitter" {
-		cmd := exec.Command("linux-enable-ir-emitter", "run")
+		cmd := execCommand("linux-enable-ir-emitter", "run")
 		if err := cmd.Run(); err == nil {
-			c.irEmitter.Enabled = true
-			logging.Info("IR emitter enabled via linux-enable-ir-emitter")
+			logging.Debug("IR emitter triggered via linux-enable-ir-emitter")
 			return nil
 		}
 	}
@@ -312,8 +344,7 @@ func (c *V4L2Camera) EnableIREmitter() error {
 	// Try sysfs control
 	if c.irEmitter.Device != "" {
 		if err := os.WriteFile(c.irEmitter.Device, []byte("1"), 0644); err == nil {
-			c.irEmitter.Enabled = true
-			logging.Info("IR emitter enabled via sysfs")
+			logging.Debug("IR emitter triggered via sysfs")
 			return nil
 		}
 	}
@@ -330,16 +361,162 @@ func (c *V4L2Camera) DisableIREmitter() error {
 	logging.Debug("Disabling IR emitter")
 
 	if c.irEmitter.Tool == "linux-enable-ir-emitter" {
-		cmd := exec.Command("linux-enable-ir-emitter", "run", "--disable")
-		cmd.Run() // Ignore errors
+		cmd := execCommand("linux-enable-ir-emitter", "run", "--disable")
+		_ = cmd.Run() // Ignore errors
 	}
 
 	if c.irEmitter.Device != "" {
-		os.WriteFile(c.irEmitter.Device, []byte("0"), 0644)
+		_ = os.WriteFile(c.irEmitter.Device, []byte("0"), 0644)
 	}
 
 	c.irEmitter.Enabled = false
 	return nil
+}
+
+// StartStreaming starts the camera stream.
+func (c *V4L2Camera) StartStreaming() error {
+	if !c.isOpen {
+		return ErrCameraNotOpen
+	}
+	if c.isStreaming {
+		return nil
+	}
+
+	// Re-trigger IR emitter if enabled
+	if c.irEmitter != nil && c.irEmitter.Enabled {
+		_ = c.triggerIREmitter()
+	}
+
+	// Start ffmpeg to stream MJPEG to stdout
+	// -f image2pipe -vcodec mjpeg -q:v 2 -
+	// We use 20 fps to capture over a medium duration (1.5s for 30 frames)
+	// to better detect 3D micro-movements while keeping auth fast
+	cmd := execCommand("ffmpeg",
+		"-f", "v4l2",
+		"-framerate", "20",
+		"-video_size", fmt.Sprintf("%dx%d", c.width, c.height),
+		"-i", c.device,
+		"-f", "image2pipe",
+		"-vcodec", "mjpeg",
+		"-q:v", "2", // High quality
+		"-",
+	)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to get stdout pipe: %w", err)
+	}
+
+	// Suppress stderr
+	cmd.Stderr = nil
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start ffmpeg: %w", err)
+	}
+
+	c.streamCmd = cmd
+	c.streamStdout = stdout
+	c.streamReader = bufio.NewReaderSize(stdout, 1024*1024) // 1MB buffer
+	c.isStreaming = true
+
+	logging.Debug("Camera streaming started")
+	return nil
+}
+
+// StopStreaming stops the camera stream.
+func (c *V4L2Camera) StopStreaming() error {
+	if !c.isStreaming {
+		return nil
+	}
+
+	if c.streamCmd != nil && c.streamCmd.Process != nil {
+		_ = c.streamCmd.Process.Kill()
+		_ = c.streamCmd.Wait()
+	}
+
+	c.streamCmd = nil
+	c.streamStdout = nil
+	c.streamReader = nil
+	c.isStreaming = false
+
+	logging.Debug("Camera streaming stopped")
+	return nil
+}
+
+// ReadFrame reads the next frame from the stream.
+func (c *V4L2Camera) ReadFrame() (*Frame, error) {
+	if !c.isStreaming {
+		return c.Capture() // Fallback to single capture
+	}
+
+	// Optimized JPEG reading from MJPEG stream
+	// We look for SOI (FF D8) and EOI (FF D9)
+
+	// Read until we find SOI
+	// Using ReadSlice is faster than ReadByte loop
+	for {
+		// Read until 0xFF
+		_, err := c.streamReader.ReadSlice(0xFF)
+		if err != nil {
+			if err == bufio.ErrBufferFull {
+				continue
+			}
+			return nil, err
+		}
+
+		// Check if next byte is 0xD8
+		b, err := c.streamReader.ReadByte()
+		if err != nil {
+			return nil, err
+		}
+
+		if b == 0xD8 {
+			break // Found SOI
+		}
+		// If not D8, continue searching (the 0xFF was part of data)
+	}
+
+	// We found SOI, start buffer with FF D8
+	jpegData := make([]byte, 0, 1024*50) // Pre-allocate 50KB
+	jpegData = append(jpegData, 0xFF, 0xD8)
+
+	// Read until EOI (FF D9)
+	// We read chunks and check for the marker
+	// Note: This is a simplified parser. A robust one would handle escaped FFs.
+	// But for ffmpeg mjpeg output, FF D9 is reliable as EOI.
+
+	for {
+		// Read until next 0xFF
+		slice, err := c.streamReader.ReadSlice(0xFF)
+		if err != nil {
+			// If buffer is full (ErrBufferFull), we append and continue
+			if err == bufio.ErrBufferFull {
+				jpegData = append(jpegData, slice...)
+				continue
+			}
+			return nil, err
+		}
+		jpegData = append(jpegData, slice...)
+
+		// Check next byte
+		b, err := c.streamReader.ReadByte()
+		if err != nil {
+			return nil, err
+		}
+		jpegData = append(jpegData, b)
+
+		if b == 0xD9 {
+			break // Found EOI
+		}
+	}
+
+	return &Frame{
+		Data:      jpegData,
+		Width:     c.width,
+		Height:    c.height,
+		Format:    "JPEG",
+		Timestamp: time.Now(),
+	}, nil
 }
 
 // HasIREmitter returns true if IR emitter is available.
@@ -390,7 +567,7 @@ func ListCameras() ([]DeviceInfo, error) {
 			continue
 		}
 		cameras = append(cameras, cam.GetDeviceInfo())
-		cam.Close()
+		_ = cam.Close()
 	}
 
 	return cameras, nil

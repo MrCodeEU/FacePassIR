@@ -53,9 +53,19 @@ var ErrModelNotLoaded = errors.New("recognition models not loaded")
 // ErrLowQuality is returned when face quality is below threshold.
 var ErrLowQuality = errors.New("face quality too low")
 
+// FaceEngine defines the interface for face recognition engine.
+type FaceEngine interface {
+	Recognize(data []byte) ([]face.Face, error)
+	Close()
+}
+
+// EngineFactory creates a new FaceEngine.
+type EngineFactory func(modelPath string) (FaceEngine, error)
+
 // DlibRecognizer implements face recognition using dlib via go-face.
 type DlibRecognizer struct {
-	rec       *face.Recognizer
+	rec       FaceEngine
+	factory   EngineFactory
 	modelPath string
 	loaded    bool
 	mu        sync.RWMutex
@@ -66,6 +76,9 @@ type DlibRecognizer struct {
 func NewRecognizer() *DlibRecognizer {
 	return &DlibRecognizer{
 		tolerance: 0.4, // Default tolerance for face matching
+		factory: func(path string) (FaceEngine, error) {
+			return face.NewRecognizer(path)
+		},
 	}
 }
 
@@ -92,7 +105,7 @@ func (r *DlibRecognizer) LoadModels(modelPath string) error {
 
 	logging.Infof("Loading face recognition models from: %s", modelPath)
 
-	rec, err := face.NewRecognizer(modelPath)
+	rec, err := r.factory(modelPath)
 	if err != nil {
 		return fmt.Errorf("failed to load models: %w", err)
 	}
@@ -148,6 +161,13 @@ func (r *DlibRecognizer) DetectFaces(imageData []byte) ([]Face, error) {
 	result := make([]Face, len(faces))
 	for i, f := range faces {
 		rect := f.Rectangle
+
+		// Convert landmarks
+		var landmarks []Point
+		for _, p := range f.Shapes {
+			landmarks = append(landmarks, Point{X: p.X, Y: p.Y})
+		}
+
 		result[i] = Face{
 			BoundingBox: Rectangle{
 				X:      rect.Min.X,
@@ -155,6 +175,7 @@ func (r *DlibRecognizer) DetectFaces(imageData []byte) ([]Face, error) {
 				Width:  rect.Dx(),
 				Height: rect.Dy(),
 			},
+			Landmarks:  landmarks,
 			Descriptor: f.Descriptor,
 			Confidence: 1.0, // go-face doesn't provide confidence, assume high
 		}

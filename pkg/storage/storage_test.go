@@ -497,7 +497,7 @@ func BenchmarkFileStorage_SaveUser(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		fs.SaveUser(userData)
+		_ = fs.SaveUser(userData)
 	}
 }
 
@@ -510,11 +510,11 @@ func BenchmarkFileStorage_LoadUser(b *testing.B) {
 		Embeddings: createTestEmbeddings(5),
 		EnrolledAt: time.Now(),
 	}
-	fs.SaveUser(userData)
+	_ = fs.SaveUser(userData)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		fs.LoadUser("benchuser")
+		_, _ = fs.LoadUser("benchuser")
 	}
 }
 
@@ -527,6 +527,6 @@ func BenchmarkEncryptDecrypt(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		encrypted, _ := fs.encrypt(data)
-		fs.decrypt(encrypted)
+		_, _ = fs.decrypt(encrypted)
 	}
 }

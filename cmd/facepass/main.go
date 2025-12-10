@@ -5,11 +5,15 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MrCodeEU/facepass/pkg/camera"
 	"github.com/MrCodeEU/facepass/pkg/config"
+	"github.com/MrCodeEU/facepass/pkg/liveness"
 	"github.com/MrCodeEU/facepass/pkg/logging"
 	"github.com/MrCodeEU/facepass/pkg/recognition"
 	"github.com/MrCodeEU/facepass/pkg/storage"
@@ -84,6 +88,12 @@ func init() {
 			Description: "Show version information",
 			Usage:       "facepass version",
 			Run:         cmdVersion,
+		},
+		"download-models": {
+			Name:        "download-models",
+			Description: "Download required dlib models",
+			Usage:       "facepass download-models [directory]",
+			Run:         cmdDownloadModels,
 		},
 		"help": {
 			Name:        "help",
@@ -161,7 +171,7 @@ func printUsage() {
 	fmt.Println("  -config <file>   Path to configuration file")
 	fmt.Println("  -debug           Enable debug logging")
 	fmt.Println("\nCommands:")
-	for _, name := range []string{"enroll", "add-face", "test", "remove", "list", "cameras", "config", "version", "help"} {
+	for _, name := range []string{"enroll", "add-face", "test", "remove", "list", "cameras", "config", "download-models", "version", "help"} {
 		cmd := commands[name]
 		fmt.Printf("  %-12s %s\n", cmd.Name, cmd.Description)
 	}
@@ -182,7 +192,7 @@ func initRecognizer() error {
 	recognizer.SetTolerance(cfg.Recognition.Tolerance)
 
 	if err := recognizer.LoadModels(cfg.Recognition.ModelPath); err != nil {
-		return fmt.Errorf("failed to load face recognition models: %w\n\nPlease ensure dlib models are installed in: %s\n\nRequired files:\n  - shape_predictor_5_face_landmarks.dat\n  - dlib_face_recognition_resnet_model_v1.dat\n\nDownload from: http://dlib.net/files/", cfg.Recognition.ModelPath)
+		return fmt.Errorf("failed to load face recognition models: %w\n\nPlease ensure dlib models are installed in: %s\n\nRequired files:\n  - shape_predictor_5_face_landmarks.dat\n  - dlib_face_recognition_resnet_model_v1.dat\n\nDownload from: http://dlib.net/files/", err, cfg.Recognition.ModelPath)
 	}
 
 	return nil
@@ -207,7 +217,7 @@ func initStorage() error {
 func waitForEnter(prompt string) {
 	fmt.Print(prompt)
 	reader := bufio.NewReader(os.Stdin)
-	reader.ReadString('\n')
+	_, _ = reader.ReadString('\n')
 }
 
 // Command implementations
@@ -239,11 +249,11 @@ func cmdEnroll(args []string) error {
 	if err := initRecognizer(); err != nil {
 		return err
 	}
-	defer recognizer.Close()
+	defer func() { _ = recognizer.Close() }()
 
 	// Initialize camera
 	cam := camera.NewCamera()
-	cam.SetResolution(cfg.Camera.Width, cfg.Camera.Height)
+	_ = cam.SetResolution(cfg.Camera.Width, cfg.Camera.Height)
 
 	// Select camera device
 	device := cfg.Camera.Device
@@ -257,17 +267,23 @@ func cmdEnroll(args []string) error {
 	if err := cam.Open(device); err != nil {
 		return fmt.Errorf("failed to open camera %s: %w", device, err)
 	}
-	defer cam.Close()
+	defer func() { _ = cam.Close() }()
 
 	// Enable IR emitter if available
 	if cam.HasIREmitter() && cfg.Camera.IREmitterEnabled {
-		cam.EnableIREmitter()
-		defer cam.DisableIREmitter()
+		_ = cam.EnableIREmitter()
+		defer func() { _ = cam.DisableIREmitter() }()
 	}
+
+	// Start streaming for faster capture
+	if err := cam.StartStreaming(); err != nil {
+		logging.Warnf("Failed to start streaming, falling back to single capture: %v", err)
+	}
+	defer func() { _ = cam.StopStreaming() }()
 
 	fmt.Printf("\nStarting enrollment for '%s'...\n", username)
 	fmt.Println("Please ensure good lighting and face the camera.")
-	fmt.Println("You will be prompted to capture 5 different angles.\n")
+	fmt.Println("You will be prompted to capture 5 different angles.")
 
 	embeddings := make([]recognition.Embedding, 0, len(enrollmentAngles))
 
@@ -276,9 +292,23 @@ func cmdEnroll(args []string) error {
 		fmt.Printf("[%d/%d] %s\n", i+1, len(enrollmentAngles), prompt)
 		waitForEnter("      Press Enter when ready...")
 
-		// Capture frame
+		// Capture frame (uses ReadFrame which handles streaming)
 		fmt.Print("      Capturing... ")
-		frame, err := cam.Capture()
+
+		// We capture a few frames to ensure we get a good one, but for enrollment
+		// we just take the first valid one for now.
+		// In the future we could average them.
+		var frame *camera.Frame
+		var err error
+
+		// Try to read up to 5 frames to clear buffer/get fresh frame
+		for k := 0; k < 5; k++ {
+			frame, err = cam.ReadFrame()
+			if err == nil {
+				break
+			}
+		}
+
 		if err != nil {
 			fmt.Printf("FAILED: %v\n", err)
 			fmt.Println("      Skipping this angle, continuing...")
@@ -289,9 +319,10 @@ func cmdEnroll(args []string) error {
 		embedding, err := recognizer.RecognizeFace(frame.Data, angle)
 		if err != nil {
 			fmt.Printf("FAILED: %v\n", err)
-			if err == recognition.ErrNoFaceDetected {
+			switch err {
+			case recognition.ErrNoFaceDetected:
 				fmt.Println("      No face detected. Please ensure your face is visible.")
-			} else if err == recognition.ErrMultipleFaces {
+			case recognition.ErrMultipleFaces:
 				fmt.Println("      Multiple faces detected. Please ensure only you are in frame.")
 			}
 			fmt.Println("      Skipping this angle, continuing...")
@@ -344,11 +375,11 @@ func cmdAddFace(args []string) error {
 	if err := initRecognizer(); err != nil {
 		return err
 	}
-	defer recognizer.Close()
+	defer func() { _ = recognizer.Close() }()
 
 	// Initialize camera
 	cam := camera.NewCamera()
-	cam.SetResolution(cfg.Camera.Width, cfg.Camera.Height)
+	_ = cam.SetResolution(cfg.Camera.Width, cfg.Camera.Height)
 
 	device := cfg.Camera.Device
 	if cfg.Camera.PreferIR {
@@ -360,12 +391,18 @@ func cmdAddFace(args []string) error {
 	if err := cam.Open(device); err != nil {
 		return fmt.Errorf("failed to open camera: %w", err)
 	}
-	defer cam.Close()
+	defer func() { _ = cam.Close() }()
 
 	if cam.HasIREmitter() && cfg.Camera.IREmitterEnabled {
-		cam.EnableIREmitter()
-		defer cam.DisableIREmitter()
+		_ = cam.EnableIREmitter()
+		defer func() { _ = cam.DisableIREmitter() }()
 	}
+
+	// Start streaming for faster capture
+	if err := cam.StartStreaming(); err != nil {
+		logging.Warnf("Failed to start streaming, falling back to single capture: %v", err)
+	}
+	defer func() { _ = cam.StopStreaming() }()
 
 	fmt.Printf("\nAdding face angles for '%s'...\n", username)
 	fmt.Println("Position yourself and press Enter when ready.")
@@ -373,7 +410,17 @@ func cmdAddFace(args []string) error {
 	waitForEnter("Press Enter to capture... ")
 
 	fmt.Print("Capturing... ")
-	frame, err := cam.Capture()
+
+	// Read a few frames to clear buffer
+	var frame *camera.Frame
+	var err error
+	for k := 0; k < 5; k++ {
+		frame, err = cam.ReadFrame()
+		if err == nil {
+			break
+		}
+	}
+
 	if err != nil {
 		return fmt.Errorf("capture failed: %w", err)
 	}
@@ -419,11 +466,11 @@ func cmdTest(args []string) error {
 	if err := initRecognizer(); err != nil {
 		return err
 	}
-	defer recognizer.Close()
+	defer func() { _ = recognizer.Close() }()
 
 	// Initialize camera
 	cam := camera.NewCamera()
-	cam.SetResolution(cfg.Camera.Width, cfg.Camera.Height)
+	_ = cam.SetResolution(cfg.Camera.Width, cfg.Camera.Height)
 
 	device := cfg.Camera.Device
 	if cfg.Camera.PreferIR {
@@ -435,11 +482,11 @@ func cmdTest(args []string) error {
 	if err := cam.Open(device); err != nil {
 		return fmt.Errorf("failed to open camera: %w", err)
 	}
-	defer cam.Close()
+	defer func() { _ = cam.Close() }()
 
 	if cam.HasIREmitter() && cfg.Camera.IREmitterEnabled {
-		cam.EnableIREmitter()
-		defer cam.DisableIREmitter()
+		_ = cam.EnableIREmitter()
+		defer func() { _ = cam.DisableIREmitter() }()
 	}
 
 	fmt.Printf("\nTesting face recognition for '%s'...\n", username)
@@ -447,20 +494,184 @@ func cmdTest(args []string) error {
 
 	waitForEnter("Press Enter when ready... ")
 
-	fmt.Print("Capturing and analyzing... ")
-	frame, err := cam.Capture()
-	if err != nil {
-		return fmt.Errorf("capture failed: %w", err)
+	fmt.Println("Capturing and analyzing (capturing multiple frames)... ")
+
+	// Start streaming for faster capture
+	if err := cam.StartStreaming(); err != nil {
+		logging.Warnf("Failed to start streaming, falling back to single capture: %v", err)
+	}
+	defer func() { _ = cam.StopStreaming() }()
+
+	// Initialize liveness detector
+	livenessCfg := liveness.DefaultConfig()
+	livenessCfg.Level = liveness.LevelStandard
+	// Map thresholds from config
+	livenessCfg.MovementThreshold = cfg.Liveness.Thresholds.Movement
+	livenessCfg.DepthThreshold = cfg.Liveness.Thresholds.Depth
+	livenessCfg.ConsistencyThreshold = cfg.Liveness.Thresholds.Consistency
+	detector := liveness.NewDetector(livenessCfg)
+
+	var frames []liveness.Frame
+	var embeddings []recognition.Embedding
+
+	fmt.Println("\nFrame Analysis (Debug):")
+	fmt.Println("Frame | Face | EAR   | Blink? | Action")
+	fmt.Println("------+------+-------+--------+-------")
+
+	// Pipeline Architecture:
+	// 1. Capture Goroutine -> rawFramesChan
+	// 2. Worker Pool -> resultsChan
+	// 3. Main Thread -> Collects results
+
+	type captureJob struct {
+		index int
+		frame *camera.Frame
+		err   error
 	}
 
-	probeEmbedding, err := recognizer.RecognizeFace(frame.Data, "test")
-	if err != nil {
-		fmt.Println("FAILED")
-		return fmt.Errorf("face detection failed: %w", err)
+	type processedFrame struct {
+		index     int
+		liveFrame liveness.Frame
+		embedding *recognition.Embedding
+		logMsg    string
 	}
 
-	// Find best match
-	_, distance, matched := recognizer.FindBestMatch(*probeEmbedding, storedEmbeddings)
+	// Performance Tuning:
+	// We capture 30 frames (approx 1 second at 30fps) to ensure we catch blinks and movement.
+	// However, we only process every 3rd frame (10 frames total) to reduce CPU load.
+	// This gives us a good tradeoff: 1s temporal coverage but 3x faster processing.
+	const captureCount = 30
+	const processInterval = 3
+
+	// Calculate how many frames we will actually process
+	processCount := (captureCount + processInterval - 1) / processInterval
+
+	rawFramesChan := make(chan captureJob, processCount)
+	resultsChan := make(chan processedFrame, processCount)
+
+	// Start Capture Goroutine
+	startCapture := time.Now()
+	go func() {
+		defer close(rawFramesChan)
+		for i := 0; i < captureCount; i++ {
+			frameStart := time.Now()
+			camFrame, err := cam.ReadFrame()
+
+			// Log slow frames to debug
+			duration := time.Since(frameStart)
+			if duration > 100*time.Millisecond {
+				logging.Debugf("Slow frame capture: %v", duration)
+			}
+
+			// Only process every Nth frame
+			if i%processInterval == 0 {
+				rawFramesChan <- captureJob{index: i, frame: camFrame, err: err}
+			}
+		}
+	}()
+
+	// Start Worker Pool
+	numWorkers := runtime.NumCPU()
+	var wg sync.WaitGroup
+
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range rawFramesChan {
+				if job.err != nil {
+					logging.Warnf("Failed to capture frame %d: %v", job.index, job.err)
+					continue
+				}
+
+				camFrame := job.frame
+				liveFrame := liveness.Frame{
+					Data:      camFrame.Data,
+					IsIR:      cam.GetDeviceInfo().IsIR,
+					Timestamp: camFrame.Timestamp,
+					FaceFound: false,
+				}
+
+				var emb *recognition.Embedding
+				var logMsg string
+
+				// Detect face
+				face, err := recognizer.DetectSingleFace(camFrame.Data)
+				if err == nil {
+					liveFrame.FaceFound = true
+					embVal := recognizer.GetEmbedding(face, "test")
+					emb = &embVal
+					liveFrame.Embedding = embVal // Copy embedding to frame
+
+					// Convert landmarks
+					var landmarks []liveness.Point
+					for _, p := range face.Landmarks {
+						landmarks = append(landmarks, liveness.Point{X: float64(p.X), Y: float64(p.Y)})
+					}
+					liveFrame.Landmarks = landmarks
+
+					// Calculate EAR
+					if len(landmarks) >= 5 {
+						leftEye := landmarks[0:2]
+						rightEye := landmarks[2:4]
+						leftEAR := liveness.CalculateEyeAspectRatio(leftEye)
+						rightEAR := liveness.CalculateEyeAspectRatio(rightEye)
+						liveFrame.EyeAspectRatio = (leftEAR + rightEAR) / 2.0
+					}
+					logMsg = fmt.Sprintf(" %4d | Yes  | %.3f |        |\n", job.index, liveFrame.EyeAspectRatio)
+				} else {
+					logMsg = fmt.Sprintf(" %4d | No   | ----- |        |\n", job.index)
+				}
+
+				resultsChan <- processedFrame{index: job.index, liveFrame: liveFrame, embedding: emb, logMsg: logMsg}
+			}
+		}()
+	}
+
+	// Wait for workers in background to close results channel
+	go func() {
+		wg.Wait()
+		close(resultsChan)
+	}()
+
+	// Collect results as they come in
+	processedResults := make([]processedFrame, 0, processCount)
+	for res := range resultsChan {
+		processedResults = append(processedResults, res)
+	}
+
+	captureDuration := time.Since(startCapture)
+	_ = cam.StopStreaming() // Stop streaming immediately to save resources
+
+	fmt.Printf("Captured %d frames, processed %d frames in %v.\n",
+		captureCount, len(processedResults), captureDuration)
+
+	// Sort by index to maintain order
+	sort.Slice(processedResults, func(i, j int) bool {
+		return processedResults[i].index < processedResults[j].index
+	})
+
+	// Output results and build final lists
+	frames = make([]liveness.Frame, 0, len(processedResults))
+	for _, res := range processedResults {
+		frames = append(frames, res.liveFrame)
+		if res.embedding != nil {
+			embeddings = append(embeddings, *res.embedding)
+		}
+		fmt.Print(res.logMsg)
+	}
+
+	if len(embeddings) == 0 {
+		fmt.Println("FAILED: No face detected in any frame")
+		return nil
+	}
+
+	// Liveness Check
+	livenessResult := detector.Detect(frames)
+
+	// Recognition (use average embedding)
+	avgEmbedding := recognition.AverageEmbedding(embeddings)
+	_, distance, matched := recognizer.FindBestMatch(avgEmbedding, storedEmbeddings)
 
 	fmt.Println("Done")
 	fmt.Println()
@@ -478,18 +689,27 @@ func cmdTest(args []string) error {
 	fmt.Printf("  Distance:   %.4f\n", distance)
 	fmt.Printf("  Confidence: %.1f%%\n", confidence*100)
 	fmt.Printf("  Threshold:  %.2f\n", cfg.Recognition.Tolerance)
+	fmt.Printf("  Liveness:   %v (Score: %.2f)\n", livenessResult.IsLive, livenessResult.Score)
+	if !livenessResult.IsLive {
+		fmt.Printf("  Liveness Reason: %s\n", livenessResult.Reason)
+	}
 	fmt.Println()
 
 	if matched {
-		fmt.Printf("SUCCESS: Face matches user '%s'\n", username)
-		logging.Infof("Face recognition test PASSED for user: %s (distance: %.4f)", username, distance)
+		if livenessResult.IsLive {
+			fmt.Printf("SUCCESS: Face matches user '%s' and liveness confirmed\n", username)
+			logging.Infof("Face recognition test PASSED for user: %s (distance: %.4f, liveness: %.2f)", username, distance, livenessResult.Score)
+		} else {
+			fmt.Printf("WARNING: Face matches user '%s' BUT liveness check failed\n", username)
+			logging.Warnf("Face recognition test MATCHED but LIVENESS FAILED for user: %s (distance: %.4f, reason: %s)", username, distance, livenessResult.Reason)
+		}
 	} else {
 		fmt.Printf("FAILED: Face does not match user '%s'\n", username)
 		logging.Warnf("Face recognition test FAILED for user: %s (distance: %.4f)", username, distance)
 	}
 
 	// Update last used timestamp
-	store.UpdateLastUsed(username)
+	_ = store.UpdateLastUsed(username)
 
 	return nil
 }

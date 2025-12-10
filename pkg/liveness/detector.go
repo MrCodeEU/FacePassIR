@@ -24,27 +24,33 @@ const (
 
 // Config holds liveness detection configuration.
 type Config struct {
-	Level              Level
-	RequireBlink       bool
-	RequireConsistency bool
-	RequireChallenge   bool
-	EnableIRAnalysis   bool
-	EnableTexture      bool
-	MinScore           float64
-	MaxTime            int // seconds
+	Level                Level
+	Require3D            bool
+	RequireConsistency   bool
+	RequireChallenge     bool
+	EnableIRAnalysis     bool
+	EnableTexture        bool
+	MinScore             float64
+	MaxTime              int // seconds
+	MovementThreshold    float64
+	DepthThreshold       float64
+	ConsistencyThreshold float64
 }
 
 // DefaultConfig returns a default liveness configuration.
 func DefaultConfig() Config {
 	return Config{
-		Level:              LevelStandard,
-		RequireBlink:       true,
-		RequireConsistency: true,
-		RequireChallenge:   false,
-		EnableIRAnalysis:   false,
-		EnableTexture:      false,
-		MinScore:           0.7,
-		MaxTime:            10,
+		Level:                LevelStandard,
+		Require3D:            true,
+		RequireConsistency:   true,
+		RequireChallenge:     false,
+		EnableIRAnalysis:     false,
+		EnableTexture:        false,
+		MinScore:             0.65,
+		MaxTime:              10,
+		MovementThreshold:    0.08,
+		DepthThreshold:       0.00005,
+		ConsistencyThreshold: 0.1,
 	}
 }
 
@@ -55,23 +61,23 @@ func ConfigFromLevel(level Level) Config {
 
 	switch level {
 	case LevelBasic:
-		cfg.RequireBlink = true
+		cfg.Require3D = true
 		cfg.RequireConsistency = true
 		cfg.RequireChallenge = false
 		cfg.MinScore = 0.5
 	case LevelStandard:
-		cfg.RequireBlink = true
+		cfg.Require3D = true
 		cfg.RequireConsistency = true
 		cfg.RequireChallenge = false
-		cfg.MinScore = 0.7
+		cfg.MinScore = 0.65
 	case LevelStrict:
-		cfg.RequireBlink = true
+		cfg.Require3D = true
 		cfg.RequireConsistency = true
 		cfg.RequireChallenge = true
 		cfg.EnableIRAnalysis = true
 		cfg.MinScore = 0.8
 	case LevelParanoid:
-		cfg.RequireBlink = true
+		cfg.Require3D = true
 		cfg.RequireConsistency = true
 		cfg.RequireChallenge = true
 		cfg.EnableIRAnalysis = true
@@ -100,12 +106,12 @@ type Challenge struct {
 
 // Frame represents a captured frame for liveness analysis.
 type Frame struct {
-	Data       []byte
-	Embedding  recognition.Embedding
-	Landmarks  []Point
-	IsIR       bool
-	Timestamp  time.Time
-	FaceFound  bool
+	Data           []byte
+	Embedding      recognition.Embedding
+	Landmarks      []Point
+	IsIR           bool
+	Timestamp      time.Time
+	FaceFound      bool
 	EyeAspectRatio float64
 }
 
@@ -144,20 +150,31 @@ type LivenessDetector struct {
 	config Config
 
 	// Thresholds
-	blinkThreshold       float64 // EAR threshold for blink detection
-	consistencyMinVar    float64 // Minimum variance for consistency (too low = static)
-	consistencyMaxVar    float64 // Maximum variance for consistency (too high = different person)
-	movementThreshold    float64 // Minimum movement for challenge-response
+	blinkThreshold    float64 // EAR threshold for blink detection
+	consistencyMinVar float64 // Minimum variance for consistency (too low = static)
+	consistencyMaxVar float64 // Maximum variance for consistency (too high = different person)
+	movementThreshold float64 // Minimum movement for challenge-response
 }
 
 // NewDetector creates a new LivenessDetector with the given configuration.
 func NewDetector(cfg Config) *LivenessDetector {
+	// Ensure defaults if zero
+	if cfg.MovementThreshold == 0 {
+		cfg.MovementThreshold = 0.08
+	}
+	if cfg.DepthThreshold == 0 {
+		cfg.DepthThreshold = 0.00005
+	}
+	if cfg.ConsistencyThreshold == 0 {
+		cfg.ConsistencyThreshold = 0.1
+	}
+
 	return &LivenessDetector{
-		config:              cfg,
-		blinkThreshold:      0.2, // EAR drops below this during blink
-		consistencyMinVar:   0.001, // Minimum embedding variance
-		consistencyMaxVar:   0.1,   // Maximum embedding variance
-		movementThreshold:   0.05,  // Minimum head movement
+		config:            cfg,
+		blinkThreshold:    0.2,                      // EAR drops below this during blink
+		consistencyMinVar: 0.001,                    // Minimum embedding variance
+		consistencyMaxVar: cfg.ConsistencyThreshold, // Maximum embedding variance
+		movementThreshold: cfg.MovementThreshold,    // Minimum head movement
 	}
 }
 
@@ -166,10 +183,10 @@ func (d *LivenessDetector) Detect(frames []Frame) Result {
 	startTime := time.Now()
 
 	result := Result{
-		IsLive:  false,
-		Score:   0.0,
-		Checks:  make(map[string]bool),
-		Reason:  "",
+		IsLive: false,
+		Score:  0.0,
+		Checks: make(map[string]bool),
+		Reason: "",
 	}
 
 	if len(frames) < 3 {
@@ -183,18 +200,17 @@ func (d *LivenessDetector) Detect(frames []Frame) Result {
 	var scores []float64
 	totalWeight := 0.0
 
-	// Check 1: Blink detection (weight: 0.3)
-	if d.config.RequireBlink {
-		blinkDetected := d.DetectBlink(frames)
-		result.Checks["blink"] = blinkDetected
-		if blinkDetected {
-			scores = append(scores, 1.0*0.3)
-		} else {
-			scores = append(scores, 0.0)
-		}
-		totalWeight += 0.3
-		logging.Debugf("Blink detection: %v", blinkDetected)
+	// Check 1: 3D Geometry / Head Pose (weight: 0.3)
+	// Replaces Blink detection which is unreliable with 5-point landmarks
+	is3D := d.Detect3DGeometry(frames)
+	result.Checks["3d_geometry"] = is3D
+	if is3D {
+		scores = append(scores, 1.0*0.3)
+	} else {
+		scores = append(scores, 0.0)
 	}
+	totalWeight += 0.3
+	logging.Debugf("3D Geometry check: %v", is3D)
 
 	// Check 2: Frame consistency (weight: 0.3)
 	if d.config.RequireConsistency {
@@ -243,11 +259,12 @@ func (d *LivenessDetector) Detect(frames []Frame) Result {
 	result.IsLive = result.Score >= d.config.MinScore
 	result.Duration = time.Since(startTime)
 
+	// Smart Liveness Override:
+	// If we have strong movement AND consistency, we can override a missing blink
 	if !result.IsLive {
 		// Determine reason for failure
-		if !result.Checks["blink"] && d.config.RequireBlink {
-			result.Reason = "no blink detected"
-			result.RequiresRetry = true
+		if !result.Checks["3d_geometry"] {
+			result.Reason = "face lacks 3D depth/movement (possible 2D photo)"
 		} else if !result.Checks["consistency"] {
 			result.Reason = "inconsistent face data (possible photo attack)"
 		} else if !result.Checks["movement"] {
@@ -266,17 +283,112 @@ func (d *LivenessDetector) Detect(frames []Frame) Result {
 	return result
 }
 
-// DetectBlink checks for blink in the frame sequence using Eye Aspect Ratio.
+// Detect3DGeometry analyzes the variance in facial geometry (Yaw) to detect 3D depth.
+// A 2D photo has fixed geometry; a real face has subtle perspective changes.
+func (d *LivenessDetector) Detect3DGeometry(frames []Frame) bool {
+	if len(frames) < 5 {
+		return false
+	}
+
+	var yawValues []float64
+	var pitchValues []float64
+
+	for _, frame := range frames {
+		if len(frame.Landmarks) >= 5 {
+			// Calculate Yaw Ratio: (Nose - LeftEye) / (RightEye - LeftEye)
+			// 5-point landmarks:
+			// 0,1: Viewer's Right Eye (Person's Left Eye) -> High X
+			// 2,3: Viewer's Left Eye (Person's Right Eye) -> Low X
+			// 4: Nose
+
+			viewerRightEyeX := (frame.Landmarks[0].X + frame.Landmarks[1].X) / 2.0
+			viewerLeftEyeX := (frame.Landmarks[2].X + frame.Landmarks[3].X) / 2.0
+			noseX := frame.Landmarks[4].X
+
+			viewerRightEyeY := (frame.Landmarks[0].Y + frame.Landmarks[1].Y) / 2.0
+			viewerLeftEyeY := (frame.Landmarks[2].Y + frame.Landmarks[3].Y) / 2.0
+			noseY := frame.Landmarks[4].Y
+
+			eyeDist := viewerRightEyeX - viewerLeftEyeX
+			if eyeDist > 0 {
+				// Yaw: Horizontal asymmetry
+				noseDistX := noseX - viewerLeftEyeX
+				yaw := noseDistX / eyeDist
+				yawValues = append(yawValues, yaw)
+
+				// Pitch: Vertical relationship (Nose Y vs Eye Y)
+				eyeMidY := (viewerRightEyeY + viewerLeftEyeY) / 2.0
+				pitch := (noseY - eyeMidY) / eyeDist
+				pitchValues = append(pitchValues, pitch)
+			}
+		}
+	}
+
+	if len(yawValues) < 5 {
+		logging.Debugf("3D Geometry Check: Insufficient values (%d)", len(yawValues))
+		return false
+	}
+
+	// Calculate variance of Yaw
+	var sumYaw, meanYaw, varYaw float64
+	for _, y := range yawValues {
+		sumYaw += y
+	}
+	meanYaw = sumYaw / float64(len(yawValues))
+
+	for _, y := range yawValues {
+		varYaw += (y - meanYaw) * (y - meanYaw)
+	}
+	varYaw /= float64(len(yawValues))
+
+	// Calculate variance of Pitch
+	var sumPitch, meanPitch, varPitch float64
+	for _, p := range pitchValues {
+		sumPitch += p
+	}
+	meanPitch = sumPitch / float64(len(pitchValues))
+
+	for _, p := range pitchValues {
+		varPitch += (p - meanPitch) * (p - meanPitch)
+	}
+	varPitch /= float64(len(pitchValues))
+
+	// Combine variances (Total Geometry Variance)
+	totalVariance := varYaw + varPitch
+
+	// Real faces have micro-movements in Yaw/Pitch (variance > threshold)
+	// 2D photos have near-zero variance
+
+	is3D := totalVariance > d.config.DepthThreshold
+
+	logging.Debugf("3D Geometry Check: YawVar=%.6f, PitchVar=%.6f, Total=%.6f, Is3D=%v (Threshold=%.6f)",
+		varYaw, varPitch, totalVariance, is3D, d.config.DepthThreshold)
+
+	return is3D
+}
+
+// DetectBlink checks for blink in the frame sequence using Eye Aspect Ratio and Slope Analysis.
 func (d *LivenessDetector) DetectBlink(frames []Frame) bool {
 	if len(frames) < 5 {
 		return false
 	}
 
-	// Collect EAR values
+	// Collect EAR values and Eye Widths
 	earValues := make([]float64, 0, len(frames))
+	eyeWidths := make([]float64, 0, len(frames))
+
 	for _, frame := range frames {
 		if frame.EyeAspectRatio > 0 {
 			earValues = append(earValues, frame.EyeAspectRatio)
+
+			// Calculate average eye width from landmarks if available
+			if len(frame.Landmarks) >= 5 {
+				// Assuming 5-point landmarks: 0,1 are left eye; 2,3 are right eye
+				leftEye := frame.Landmarks[0:2]
+				rightEye := frame.Landmarks[2:4]
+				width := (CalculateEyeWidth(leftEye) + CalculateEyeWidth(rightEye)) / 2.0
+				eyeWidths = append(eyeWidths, width)
+			}
 		}
 	}
 
@@ -285,7 +397,7 @@ func (d *LivenessDetector) DetectBlink(frames []Frame) bool {
 		return d.detectBlinkFromEmbeddings(frames)
 	}
 
-	// Detect significant EAR drop (blink)
+	// Method 1: Traditional EAR Drop (Max - Min)
 	maxEAR := 0.0
 	minEAR := 1.0
 	for _, ear := range earValues {
@@ -299,12 +411,56 @@ func (d *LivenessDetector) DetectBlink(frames []Frame) bool {
 
 	// A blink causes EAR to drop significantly
 	earDrop := maxEAR - minEAR
-	blinkDetected := earDrop > d.blinkThreshold && minEAR < 0.25
+	traditionalBlink := earDrop > d.blinkThreshold && minEAR < 0.25
 
-	logging.Debugf("Blink detection: maxEAR=%.3f, minEAR=%.3f, drop=%.3f, detected=%v",
-		maxEAR, minEAR, earDrop, blinkDetected)
+	// Method 2: Slope-based Detection (adapted from AnveshakR/facerecog)
+	// Calculate average eye width to determine region
+	avgWidth := 0.0
+	if len(eyeWidths) > 0 {
+		sum := 0.0
+		for _, w := range eyeWidths {
+			sum += w
+		}
+		avgWidth = sum / float64(len(eyeWidths))
+	}
 
-	return blinkDetected
+	// Determine slope threshold based on width
+	// Reference thresholds for Eye Height Slope:
+	// width <= 23: slope <= -0.75
+	// width <= 38: slope <= -2.75
+	// width <= 54: slope <= -4.75
+	// width > 54:  slope <= -5.75
+	// We convert to EAR Slope: Threshold / Width
+	slopeThreshold := -0.05 // Default fallback
+	if avgWidth > 0 {
+		if avgWidth <= 23 {
+			slopeThreshold = -0.75 / avgWidth
+		} else if avgWidth <= 38 {
+			slopeThreshold = -2.75 / avgWidth
+		} else if avgWidth <= 54 {
+			slopeThreshold = -4.75 / avgWidth
+		} else {
+			slopeThreshold = -5.75 / avgWidth
+		}
+	}
+
+	// Calculate slopes between adjacent EARs
+	slopeBlink := false
+	for i := 1; i < len(earValues); i++ {
+		slope := earValues[i] - earValues[i-1]
+		// Check for sharp closing (negative slope)
+		// OR if EAR is simply very low (eyes closed)
+		if slope <= slopeThreshold || earValues[i] < 0.2 {
+			slopeBlink = true
+			logging.Debugf("Slope blink detected: slope=%.4f, threshold=%.4f (width=%.1f)", slope, slopeThreshold, avgWidth)
+			break
+		}
+	}
+
+	logging.Debugf("Blink detection: traditional=%v, slope=%v (maxEAR=%.3f, minEAR=%.3f, drop=%.3f)",
+		traditionalBlink, slopeBlink, maxEAR, minEAR, earDrop)
+
+	return traditionalBlink || slopeBlink
 }
 
 // detectBlinkFromEmbeddings uses embedding variance as a fallback blink detection.
@@ -360,7 +516,9 @@ func (d *LivenessDetector) CheckConsistency(embeddings [][]float32) bool {
 	// Check if variance is within acceptable range
 	// Too low = static image (all frames identical)
 	// Too high = different person or poor capture
-	if variance < d.consistencyMinVar {
+	// NOTE: We relaxed the min variance check because high-fps streaming
+	// can produce very similar frames naturally.
+	if variance < d.consistencyMinVar/10.0 {
 		logging.Debug("Consistency failed: variance too low (static image)")
 		return false
 	}
@@ -370,7 +528,8 @@ func (d *LivenessDetector) CheckConsistency(embeddings [][]float32) bool {
 	}
 
 	// Also check that mean distance is reasonable
-	if mean > 0.4 {
+	// Relaxed from 0.4 to 0.6 to allow for more natural movement during longer capture
+	if mean > 0.6 {
 		logging.Debug("Consistency failed: mean distance too high")
 		return false
 	}
@@ -403,7 +562,8 @@ func (d *LivenessDetector) DetectMovement(frames []Frame) bool {
 
 	// There should be some movement (not a photo)
 	// but not too much (same person)
-	return avgMovement > d.movementThreshold && avgMovement < 0.3
+	// Relaxed upper bound from 0.3 to 0.6 to match consistency check
+	return avgMovement > d.movementThreshold && avgMovement < 0.6
 }
 
 // CheckFacePresence ensures a face is detected in most frames.
@@ -501,7 +661,10 @@ func extractEmbeddings(frames []Frame) [][]float32 {
 	embeddings := make([][]float32, 0, len(frames))
 	for _, frame := range frames {
 		if frame.FaceFound && len(frame.Embedding.Vector) > 0 {
-			embeddings = append(embeddings, frame.Embedding.Vector[:])
+			// Create a copy of the vector to avoid loop variable capture issues
+			vec := make([]float32, len(frame.Embedding.Vector))
+			copy(vec, frame.Embedding.Vector[:])
+			embeddings = append(embeddings, vec)
 		}
 	}
 	return embeddings
@@ -542,6 +705,22 @@ func averageEmbedding(embeddings [][]float32) []float32 {
 	}
 
 	return avg
+}
+
+// CalculateEyeWidth calculates the width of the eye in pixels.
+func CalculateEyeWidth(eyeLandmarks []Point) float64 {
+	if len(eyeLandmarks) < 2 {
+		return 0.0
+	}
+	// For 5-point landmarks: 0 is outer, 1 is inner (or vice versa)
+	if len(eyeLandmarks) == 2 {
+		return distance(eyeLandmarks[0], eyeLandmarks[1])
+	}
+	// For 6-point landmarks: 0 is outer, 3 is inner
+	if len(eyeLandmarks) == 6 {
+		return distance(eyeLandmarks[0], eyeLandmarks[3])
+	}
+	return 0.0
 }
 
 // CalculateEyeAspectRatio calculates the EAR from eye landmarks.

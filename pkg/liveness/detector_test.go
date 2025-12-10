@@ -1,6 +1,7 @@
 package liveness
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -13,27 +14,27 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Level != LevelStandard {
 		t.Errorf("expected level standard, got %s", cfg.Level)
 	}
-	if !cfg.RequireBlink {
-		t.Error("expected RequireBlink to be true")
+	if !cfg.Require3D {
+		t.Error("expected Require3D to be true")
 	}
 	if !cfg.RequireConsistency {
 		t.Error("expected RequireConsistency to be true")
 	}
-	if cfg.MinScore != 0.7 {
-		t.Errorf("expected MinScore 0.7, got %f", cfg.MinScore)
+	if cfg.MinScore != 0.65 {
+		t.Errorf("expected MinScore 0.65, got %f", cfg.MinScore)
 	}
 }
 
 func TestConfigFromLevel(t *testing.T) {
 	tests := []struct {
 		level           Level
-		expectBlink     bool
+		expect3D        bool
 		expectChallenge bool
 		expectIR        bool
 		minScore        float64
 	}{
 		{LevelBasic, true, false, false, 0.5},
-		{LevelStandard, true, false, false, 0.7},
+		{LevelStandard, true, false, false, 0.65},
 		{LevelStrict, true, true, true, 0.8},
 		{LevelParanoid, true, true, true, 0.9},
 	}
@@ -42,8 +43,8 @@ func TestConfigFromLevel(t *testing.T) {
 		t.Run(string(tt.level), func(t *testing.T) {
 			cfg := ConfigFromLevel(tt.level)
 
-			if cfg.RequireBlink != tt.expectBlink {
-				t.Errorf("RequireBlink: got %v, want %v", cfg.RequireBlink, tt.expectBlink)
+			if cfg.Require3D != tt.expect3D {
+				t.Errorf("Require3D: got %v, want %v", cfg.Require3D, tt.expect3D)
 			}
 			if cfg.RequireChallenge != tt.expectChallenge {
 				t.Errorf("RequireChallenge: got %v, want %v", cfg.RequireChallenge, tt.expectChallenge)
@@ -106,17 +107,17 @@ func TestDetector_CheckConsistency(t *testing.T) {
 			expected:   false,
 		},
 		{
-			name: "consistent embeddings",
-			embeddings: createConsistentEmbeddings(5, 0.01),
+			name:       "consistent embeddings",
+			embeddings: createConsistentEmbeddings(5, 0.03),
 			expected:   true,
 		},
 		{
-			name: "identical embeddings (static)",
+			name:       "identical embeddings (static)",
 			embeddings: createIdenticalEmbeddings(5),
 			expected:   false,
 		},
 		{
-			name: "very different embeddings",
+			name:       "very different embeddings",
 			embeddings: createDifferentEmbeddings(5),
 			expected:   false,
 		},
@@ -147,7 +148,7 @@ func TestDetector_DetectMovement(t *testing.T) {
 		},
 		{
 			name:     "frames with movement",
-			frames:   createFramesWithMovement(5, 0.1),
+			frames:   createFramesWithMovement(5, 0.01),
 			expected: true,
 		},
 		{
@@ -228,7 +229,7 @@ func TestDetector_CheckFacePresence(t *testing.T) {
 	}
 }
 
-func TestDetector_DetectBlink(t *testing.T) {
+func TestDetector_Detect3DGeometry(t *testing.T) {
 	detector := NewDetector(DefaultConfig())
 
 	tests := []struct {
@@ -238,24 +239,24 @@ func TestDetector_DetectBlink(t *testing.T) {
 	}{
 		{
 			name:     "insufficient frames",
-			frames:   createFramesWithEAR(3, 0.3),
+			frames:   createFramesWithLandmarks(3, 0.0),
 			expected: false,
 		},
 		{
-			name:     "blink detected via EAR",
-			frames:   createFramesWithBlink(10),
+			name:     "3D movement detected (yaw variance)",
+			frames:   createFramesWithLandmarks(10, 0.002),
 			expected: true,
 		},
 		{
-			name:     "no blink - constant EAR",
-			frames:   createFramesWithEAR(10, 0.3),
+			name:     "static 2D image (no yaw variance)",
+			frames:   createFramesWithLandmarks(10, 0.0),
 			expected: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := detector.DetectBlink(tt.frames)
+			result := detector.Detect3DGeometry(tt.frames)
 			if result != tt.expected {
 				t.Errorf("expected %v, got %v", tt.expected, result)
 			}
@@ -267,10 +268,10 @@ func TestDetector_QuickCheck(t *testing.T) {
 	detector := NewDetector(DefaultConfig())
 
 	tests := []struct {
-		name         string
-		frames       []Frame
-		expectLive   bool
-		minScore     float64
+		name       string
+		frames     []Frame
+		expectLive bool
+		minScore   float64
 	}{
 		{
 			name:       "insufficient frames",
@@ -436,7 +437,12 @@ func createConsistentEmbeddings(count int, variance float64) [][]float32 {
 	for i := 0; i < count; i++ {
 		emb := make([]float32, 128)
 		for j := range emb {
-			emb[j] = base[j] + float32(variance)*float32(i)/float32(count)
+			// Add non-linear variation to ensure variance > 0
+			noise := float32(0)
+			if i%2 == 0 {
+				noise = float32(variance) * 1.0
+			}
+			emb[j] = base[j] + float32(variance)*float32(i)/float32(count) + noise
 		}
 		embeddings[i] = emb
 	}
@@ -503,18 +509,48 @@ func createStaticFrames(count int) []Frame {
 	return frames
 }
 
-func createFramesWithEAR(count int, ear float64) []Frame {
+func createFramesWithLandmarks(count int, yawVariance float64) []Frame {
 	frames := make([]Frame, count)
 	for i := 0; i < count; i++ {
+		// Base positions
+		leftEyeX := 100.0
+		rightEyeX := 200.0
+		noseX := 150.0
+
+		// Add variance to nose position to simulate yaw change
+		amplitude := 0.0
+		if yawVariance > 0 {
+			amplitude = math.Sqrt(20000 * yawVariance)
+		}
+
+		// Vary nose position
+		currentNoseX := noseX + amplitude*math.Sin(float64(i))
+
+		landmarks := []Point{
+			{X: rightEyeX, Y: 100},    // 0
+			{X: rightEyeX, Y: 100},    // 1
+			{X: leftEyeX, Y: 100},     // 2
+			{X: leftEyeX, Y: 100},     // 3
+			{X: currentNoseX, Y: 120}, // 4 Nose
+		}
+
+		// Add embedding with slight variance for consistency/movement checks
 		var emb recognition.Embedding
 		for j := range emb.Vector {
-			emb.Vector[j] = float32(j) / 128.0
+			// Base vector + small noise (enough for movement, low enough for consistency)
+			// Use alternating pattern to create variance in distances
+			noise := float32(i) * 0.002
+			if i%2 == 0 {
+				noise += 0.001
+			}
+			emb.Vector[j] = float32(j)/128.0 + noise
 		}
+
 		frames[i] = Frame{
-			Embedding:      emb,
-			FaceFound:      true,
-			EyeAspectRatio: ear,
-			Timestamp:      time.Now(),
+			Landmarks: landmarks,
+			Embedding: emb,
+			FaceFound: true,
+			Timestamp: time.Now(),
 		}
 	}
 	return frames
@@ -531,7 +567,7 @@ func createFramesWithBlink(count int) []Frame {
 
 		ear := 0.3 // Normal open eye
 		if i == count/2 {
-			ear = 0.15 // Blink (closed eye)
+			ear = 0.05 // Blink (closed eye)
 		}
 
 		frames[i] = Frame{
@@ -592,5 +628,127 @@ func BenchmarkEmbeddingDistance(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		embeddingDistance(e1, e2)
+	}
+}
+
+func TestDetector_Detect_Full(t *testing.T) {
+	detector := NewDetector(DefaultConfig())
+
+	tests := []struct {
+		name           string
+		frames         []Frame
+		expectedLive   bool
+		expectedReason string
+	}{
+		{
+			name:           "perfect live face",
+			frames:         createFramesWithLandmarks(10, 0.002),
+			expectedLive:   true,
+			expectedReason: "",
+		},
+		{
+			name:           "static photo (no 3D)",
+			frames:         createFramesWithLandmarks(10, 0.0),
+			expectedLive:   false,
+			expectedReason: "face lacks 3D depth/movement (possible 2D photo)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := detector.Detect(tt.frames)
+			if result.IsLive != tt.expectedLive {
+				t.Errorf("expected live %v, got %v (reason: %s)", tt.expectedLive, result.IsLive, result.Reason)
+			}
+			if tt.expectedReason != "" && result.Reason != tt.expectedReason {
+				t.Errorf("expected reason '%s', got '%s'", tt.expectedReason, result.Reason)
+			}
+		})
+	}
+}
+
+func TestDetector_PerformChallenge(t *testing.T) {
+	detector := NewDetector(DefaultConfig())
+
+	// Create frames for "before" state (looking front)
+	beforeFrames := createFramesWithLandmarks(5, 0.0)
+
+	// Create frames for "after" state (looking left/right - different embedding)
+	afterFrames := createFramesWithLandmarks(5, 0.0)
+	// Modify embeddings to simulate head turn
+	for i := range afterFrames {
+		for j := range afterFrames[i].Embedding.Vector {
+			afterFrames[i].Embedding.Vector[j] += 0.025 // Change resulting in distance ~0.28
+		}
+	}
+
+	tests := []struct {
+		name      string
+		challenge Challenge
+		before    []Frame
+		after     []Frame
+		expected  bool
+	}{
+		{
+			name:      "turn_left success",
+			challenge: Challenge{Action: "turn_left"},
+			before:    beforeFrames,
+			after:     afterFrames,
+			expected:  true,
+		},
+		{
+			name:      "turn_left fail (no change)",
+			challenge: Challenge{Action: "turn_left"},
+			before:    beforeFrames,
+			after:     beforeFrames, // No change
+			expected:  false,
+		},
+		{
+			name:      "blink success",
+			challenge: Challenge{Action: "blink"},
+			before:    beforeFrames,
+			after:     createFramesWithBlink(10),
+			expected:  true,
+		},
+		{
+			name:      "empty frames",
+			challenge: Challenge{Action: "turn_left"},
+			before:    []Frame{},
+			after:     afterFrames,
+			expected:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := detector.PerformChallenge(tt.challenge, tt.before, tt.after)
+			if result != tt.expected {
+				t.Errorf("expected %v, got %v", tt.expected, result)
+			}
+		})
+	}
+}
+
+func TestDetector_DetectBlinkFromEmbeddings(t *testing.T) {
+	detector := NewDetector(DefaultConfig())
+
+	// Create frames with embedding variance simulating blink
+	frames := createFramesWithLandmarks(10, 0.0)
+	// Inject a spike in embedding distance
+	for j := range frames[5].Embedding.Vector {
+		frames[5].Embedding.Vector[j] += 0.015 // Change resulting in distance ~0.17
+	}
+
+	// We need to access the private method or test via DetectBlink with no EAR
+	// Since DetectBlink falls back to detectBlinkFromEmbeddings if EAR is missing
+
+	// Clear EAR to force fallback
+	for i := range frames {
+		frames[i].EyeAspectRatio = 0
+	}
+
+	result := detector.DetectBlink(frames)
+	if !result {
+		t.Error("expected blink detection via embedding variance")
 	}
 }

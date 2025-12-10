@@ -31,13 +31,13 @@ type AuthResult struct {
 type ErrorCode string
 
 const (
-	ErrCodeNoFace       ErrorCode = "NO_FACE"
+	ErrCodeNoFace        ErrorCode = "NO_FACE"
 	ErrCodeMultipleFaces ErrorCode = "MULTIPLE_FACES"
-	ErrCodeLiveness     ErrorCode = "LIVENESS_FAILED"
+	ErrCodeLiveness      ErrorCode = "LIVENESS_FAILED"
 	ErrCodeNotRecognized ErrorCode = "NOT_RECOGNIZED"
-	ErrCodeCamera       ErrorCode = "CAMERA_ERROR"
-	ErrCodeTimeout      ErrorCode = "TIMEOUT"
-	ErrCodeNotEnrolled  ErrorCode = "NOT_ENROLLED"
+	ErrCodeCamera        ErrorCode = "CAMERA_ERROR"
+	ErrCodeTimeout       ErrorCode = "TIMEOUT"
+	ErrCodeNotEnrolled   ErrorCode = "NOT_ENROLLED"
 )
 
 // AuthError is a structured authentication error.
@@ -66,13 +66,13 @@ type Authenticator interface {
 
 // User-friendly error messages
 var errorMessages = map[ErrorCode]string{
-	ErrCodeNoFace:       "Please position your face in front of the camera",
+	ErrCodeNoFace:        "Please position your face in front of the camera",
 	ErrCodeMultipleFaces: "Multiple faces detected. Please ensure only you are in frame",
-	ErrCodeLiveness:     "Liveness check failed. Please blink and try again",
+	ErrCodeLiveness:      "Liveness check failed. Please blink and try again",
 	ErrCodeNotRecognized: "Face not recognized. Falling back to password...",
-	ErrCodeCamera:       "Camera error. Please check your camera connection",
-	ErrCodeTimeout:      "Face recognition timed out. Please enter your password",
-	ErrCodeNotEnrolled:  "No face data enrolled for this user",
+	ErrCodeCamera:        "Camera error. Please check your camera connection",
+	ErrCodeTimeout:       "Face recognition timed out. Please enter your password",
+	ErrCodeNotEnrolled:   "No face data enrolled for this user",
 }
 
 // GetErrorMessage returns a user-friendly message for an error code.
@@ -102,13 +102,51 @@ var ErrUserNotEnrolled = errors.New("user not enrolled")
 // ErrTimeout is returned when authentication times out.
 var ErrTimeout = errors.New("authentication timeout")
 
+// Camera defines the interface for camera operations.
+type Camera interface {
+	Capture() (*camera.Frame, error)
+	StartStreaming() error
+	StopStreaming() error
+	ReadFrame() (*camera.Frame, error)
+	HasIREmitter() bool
+	EnableIREmitter() error
+	DisableIREmitter() error
+	Close() error
+	Open(device string) error
+	SetResolution(width, height int) error
+	GetDeviceInfo() camera.DeviceInfo
+}
+
+// Recognizer defines the interface for face recognition.
+type Recognizer interface {
+	FindBestMatch(embedding recognition.Embedding, knownEmbeddings []recognition.Embedding) (int, float64, bool)
+	Close() error
+	LoadModels(path string) error
+	SetTolerance(tolerance float64)
+	DetectSingleFace(data []byte) (*recognition.Face, error)
+	GetEmbedding(face *recognition.Face, label string) recognition.Embedding
+}
+
+// Storage defines the interface for user data storage.
+type Storage interface {
+	UserExists(username string) bool
+	LoadUser(username string) (*storage.UserFaceData, error)
+	UpdateLastUsed(username string) error
+}
+
+// LivenessChecker defines the interface for liveness detection.
+type LivenessChecker interface {
+	Detect(frames []liveness.Frame) liveness.Result
+	QuickCheck(frames []liveness.Frame) (bool, float64)
+}
+
 // PAMAuthenticator implements the Authenticator interface for PAM.
 type PAMAuthenticator struct {
 	config     *config.Config
-	storage    *storage.FileStorage
-	recognizer *recognition.DlibRecognizer
-	camera     *camera.V4L2Camera
-	liveness   *liveness.LivenessDetector
+	storage    Storage
+	recognizer Recognizer
+	camera     Camera
+	liveness   LivenessChecker
 
 	timeout     time.Duration
 	maxAttempts int
@@ -123,7 +161,7 @@ func NewPAMAuthenticator(cfg *config.Config) (*PAMAuthenticator, error) {
 	}
 
 	// Initialize storage
-	store, err := storage.NewFileStorage(cfg.Storage.DataDir, cfg.Storage.Encryption)
+	store, err := storage.NewFileStorage(cfg.Storage.DataDir, cfg.Storage.EncryptionEnabled)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize storage: %w", err)
 	}
@@ -148,6 +186,10 @@ func NewPAMAuthenticator(cfg *config.Config) (*PAMAuthenticator, error) {
 	// Initialize liveness detector
 	livenessLevel := liveness.Level(cfg.Liveness.Level)
 	livenessCfg := liveness.ConfigFromLevel(livenessLevel)
+	// Apply configured thresholds
+	livenessCfg.MovementThreshold = cfg.Liveness.Thresholds.Movement
+	livenessCfg.DepthThreshold = cfg.Liveness.Thresholds.Depth
+	livenessCfg.ConsistencyThreshold = cfg.Liveness.Thresholds.Consistency
 	auth.liveness = liveness.NewDetector(livenessCfg)
 
 	return auth, nil
@@ -156,10 +198,10 @@ func NewPAMAuthenticator(cfg *config.Config) (*PAMAuthenticator, error) {
 // Close releases all resources.
 func (a *PAMAuthenticator) Close() {
 	if a.camera != nil {
-		a.camera.Close()
+		_ = a.camera.Close()
 	}
 	if a.recognizer != nil {
-		a.recognizer.Close()
+		_ = a.recognizer.Close()
 	}
 }
 
@@ -205,11 +247,21 @@ func (a *PAMAuthenticator) Authenticate(username string) AuthResult {
 			logging.Warnf("Failed to enable IR emitter: %v", err)
 		}
 	}
-	defer a.camera.DisableIREmitter()
+	defer func() {
+		_ = a.camera.DisableIREmitter()
+	}()
 
 	// Authentication loop with timeout and retries
 	ctx, cancel := context.WithTimeout(context.Background(), a.timeout)
 	defer cancel()
+
+	// Start streaming for faster capture
+	if err := a.camera.StartStreaming(); err != nil {
+		logging.Warnf("Failed to start streaming, falling back to single capture: %v", err)
+	}
+	defer func() {
+		_ = a.camera.StopStreaming()
+	}()
 
 	for attempt := 1; attempt <= a.maxAttempts; attempt++ {
 		result.Attempts = attempt
@@ -225,9 +277,15 @@ func (a *PAMAuthenticator) Authenticate(username string) AuthResult {
 		default:
 		}
 
-		// Capture multiple frames for liveness detection
-		frames, err := a.captureFramesForLiveness(ctx, 10, 100*time.Millisecond)
+		// Capture 30 frames (approx 1.5s at 20fps) for liveness detection
+		frames, err := a.captureFramesForLiveness(ctx, 30)
 		if err != nil {
+			if ctx.Err() != nil {
+				result.Error = NewAuthError(ErrCodeTimeout, false)
+				result.Reason = "authentication timed out"
+				result.Duration = time.Since(startTime)
+				return result
+			}
 			logging.Warnf("Frame capture failed on attempt %d: %v", attempt, err)
 			continue
 		}
@@ -239,10 +297,11 @@ func (a *PAMAuthenticator) Authenticate(username string) AuthResult {
 			result.Reason = livenessResult.Reason
 			if !livenessResult.RequiresRetry {
 				// Definite failure (e.g., photo attack)
+				logging.Errorf("SECURITY ALERT: Liveness check failed - potential spoofing attempt detected: %s", livenessResult.Reason)
 				result.Duration = time.Since(startTime)
 				return result
 			}
-			logging.Warnf("Liveness check failed: %s", livenessResult.Reason)
+			logging.Warnf("Liveness check failed (retrying): %s", livenessResult.Reason)
 			continue
 		}
 
@@ -263,7 +322,9 @@ func (a *PAMAuthenticator) Authenticate(username string) AuthResult {
 				username, idx, distance)
 
 			// Update last used timestamp
-			a.storage.UpdateLastUsed(username)
+			if err := a.storage.UpdateLastUsed(username); err != nil {
+				logging.Warnf("Failed to update last used timestamp: %v", err)
+			}
 
 			return result
 		}
@@ -279,7 +340,7 @@ func (a *PAMAuthenticator) Authenticate(username string) AuthResult {
 }
 
 // captureFramesForLiveness captures multiple frames for liveness detection.
-func (a *PAMAuthenticator) captureFramesForLiveness(ctx context.Context, count int, interval time.Duration) ([]liveness.Frame, error) {
+func (a *PAMAuthenticator) captureFramesForLiveness(ctx context.Context, count int) ([]liveness.Frame, error) {
 	var frames []liveness.Frame
 
 	for i := 0; i < count; i++ {
@@ -290,8 +351,8 @@ func (a *PAMAuthenticator) captureFramesForLiveness(ctx context.Context, count i
 		default:
 		}
 
-		// Capture frame
-		camFrame, err := a.camera.Capture()
+		// Capture frame (uses ReadFrame which handles streaming or fallback)
+		camFrame, err := a.camera.ReadFrame()
 		if err != nil {
 			logging.Warnf("Failed to capture frame %d: %v", i, err)
 			continue
@@ -310,17 +371,31 @@ func (a *PAMAuthenticator) captureFramesForLiveness(ctx context.Context, count i
 		if err == nil {
 			liveFrame.FaceFound = true
 			liveFrame.Embedding = a.recognizer.GetEmbedding(face, "auth")
+
+			// Convert landmarks
+			var landmarks []liveness.Point
+			for _, p := range face.Landmarks {
+				landmarks = append(landmarks, liveness.Point{X: float64(p.X), Y: float64(p.Y)})
+			}
+			liveFrame.Landmarks = landmarks
+
+			// Calculate EAR
+			if len(landmarks) >= 5 {
+				// For 5-point landmarks: 0,1 are left eye; 2,3 are right eye
+				leftEye := landmarks[0:2]
+				rightEye := landmarks[2:4]
+				leftEAR := liveness.CalculateEyeAspectRatio(leftEye)
+				rightEAR := liveness.CalculateEyeAspectRatio(rightEye)
+				liveFrame.EyeAspectRatio = (leftEAR + rightEAR) / 2.0
+			}
 		}
 
 		frames = append(frames, liveFrame)
 
-		// Wait between captures
-		if i < count-1 {
-			time.Sleep(interval)
-		}
+		// No sleep needed when streaming
 	}
 
-	if len(frames) < 3 {
+	if len(frames) < 5 {
 		return nil, fmt.Errorf("insufficient frames captured: %d", len(frames))
 	}
 
@@ -375,7 +450,15 @@ func (a *PAMAuthenticator) AuthenticateQuick(username string) AuthResult {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	frames, err := a.captureFramesForLiveness(ctx, 5, 50*time.Millisecond)
+	// Start streaming for faster capture
+	if err := a.camera.StartStreaming(); err != nil {
+		logging.Warnf("Failed to start streaming, falling back to single capture: %v", err)
+	}
+	defer func() {
+		_ = a.camera.StopStreaming()
+	}()
+
+	frames, err := a.captureFramesForLiveness(ctx, 10)
 	if err != nil {
 		result.Error = NewAuthError(ErrCodeCamera, true)
 		result.Reason = "failed to capture frames"

@@ -25,6 +25,7 @@ FacePass is a secure face recognition authentication module for Linux that integ
 
 ## Todos
 - [ ] Make one universal build (and autodetect or set via config wich GPU-Acceleration to use)
+  -[ ] Question is: Is that even necessary as the face detection is quite fast already?
 - [ ] Much more testing
 - [ ] ...
 

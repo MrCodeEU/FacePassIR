@@ -52,7 +52,7 @@ func TestManager_Initialize(t *testing.T) {
 	// CPU should always be available
 	cpuInfo := manager.GetBackendInfo(BackendCPU)
 	if cpuInfo == nil {
-		t.Error("CPU backend info should not be nil")
+		t.Fatal("CPU backend info should not be nil")
 	}
 	if !cpuInfo.Available {
 		t.Error("CPU backend should be available")
@@ -112,11 +112,11 @@ func TestManager_GetAllBackends(t *testing.T) {
 
 func TestManager_selectBackend(t *testing.T) {
 	tests := []struct {
-		name       string
-		preferred  Backend
-		available  map[Backend]*BackendInfo
-		fallback   bool
-		expected   Backend
+		name      string
+		preferred Backend
+		available map[Backend]*BackendInfo
+		fallback  bool
+		expected  Backend
 	}{
 		{
 			name:      "auto with only CPU",

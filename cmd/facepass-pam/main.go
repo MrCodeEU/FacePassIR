@@ -48,7 +48,9 @@ func main() {
 	}
 
 	// Initialize logging (to file for PAM, stdout would interfere)
-	logging.Initialize(cfg.Logging.Level, cfg.Logging.File)
+	if err := logging.Init(cfg.Logging.Level, cfg.Logging.File); err != nil {
+		fmt.Fprintf(os.Stderr, "FacePass: Logging init error: %v\n", err)
+	}
 
 	logging.Infof("FacePass PAM v%s starting authentication for: %s", version, username)
 
@@ -76,6 +78,11 @@ func main() {
 	}
 
 	// Perform authentication
+	exitCode := runAuthentication(auth, username, startTime)
+	os.Exit(exitCode)
+}
+
+func runAuthentication(auth pam.Authenticator, username string, startTime time.Time) int {
 	fmt.Fprintf(os.Stderr, "FacePass: Authenticating %s (look at camera)...\n", username)
 
 	result := auth.Authenticate(username)
@@ -86,7 +93,7 @@ func main() {
 			username, result.Confidence, result.Duration)
 		fmt.Fprintf(os.Stderr, "FacePass: Authentication successful (%.0f%% confidence)\n",
 			result.Confidence*100)
-		os.Exit(0)
+		return 0
 	}
 
 	// Authentication failed
@@ -98,29 +105,29 @@ func main() {
 		switch authErr.Code {
 		case pam.ErrCodeNotEnrolled:
 			fmt.Fprintln(os.Stderr, "FacePass: User not enrolled")
-			os.Exit(2)
+			return 2
 		case pam.ErrCodeTimeout:
 			fmt.Fprintln(os.Stderr, "FacePass: Timeout, falling back to password")
-			os.Exit(2)
+			return 2
 		case pam.ErrCodeCamera:
 			fmt.Fprintln(os.Stderr, "FacePass: Camera error, falling back to password")
-			os.Exit(3)
+			return 3
 		case pam.ErrCodeLiveness:
 			fmt.Fprintf(os.Stderr, "FacePass: %s\n", pam.GetErrorMessage(authErr.Code))
-			os.Exit(1)
+			return 1
 		case pam.ErrCodeNotRecognized:
 			fmt.Fprintln(os.Stderr, "FacePass: Face not recognized")
-			os.Exit(1)
+			return 1
 		case pam.ErrCodeNoFace:
 			fmt.Fprintln(os.Stderr, "FacePass: No face detected, falling back to password")
-			os.Exit(2)
+			return 2
 		default:
 			fmt.Fprintf(os.Stderr, "FacePass: %s\n", result.Reason)
-			os.Exit(1)
+			return 1
 		}
 	}
 
 	// Generic failure
 	fmt.Fprintf(os.Stderr, "FacePass: Authentication failed: %s\n", result.Reason)
-	os.Exit(1)
+	return 1
 }

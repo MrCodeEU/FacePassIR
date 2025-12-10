@@ -46,6 +46,8 @@ liveness_detection:
 
 # Authentication settings
 auth:
+  # Enable/Disable face authentication
+  enabled: true
   # Seconds before fallback to password
   timeout: 10
   # Max face recognition attempts
