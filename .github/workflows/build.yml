@@ -19,7 +19,7 @@ jobs:
     - name: Install Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential libdlib-dev libopenblas-dev liblapack-dev libjpeg-dev libpam0g-dev rpm
+        sudo apt-get install -y build-essential libdlib-dev libatlas-base-dev liblapack-dev libjpeg-dev libpam0g-dev rpm
 
     - name: Set up Go
       uses: actions/setup-go@v4

@@ -35,7 +35,7 @@ FacePass is a secure face recognition authentication module for Linux that integ
 
 ```bash
 # Ubuntu/Debian
-sudo apt install build-essential libdlib-dev libblas-dev liblapack-dev libpam0g-dev v4l-utils ffmpeg
+sudo apt install build-essential libdlib-dev libatlas-base-dev liblapack-dev libpam0g-dev v4l-utils ffmpeg
 
 # Fedora
 sudo dnf install dlib-devel blas-devel lapack-devel pam-devel v4l-utils ffmpeg
