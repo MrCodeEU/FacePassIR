@@ -147,6 +147,7 @@ jobs:
         License:    MIT
         URL:        https://github.com/MrCodeEU/facepass
         BuildArch:  x86_64
+        Requires:   dlib, libjpeg-turbo, atlas, lapack, pam
         
         %description
         FacePass is a secure face recognition authentication module for Linux
